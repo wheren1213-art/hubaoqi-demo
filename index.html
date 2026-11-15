@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>冷兵器战术指挥 Demo</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root { color-scheme: dark; font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; background:#151b1d; color:#e8e4d7; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:18px; }
+    .app { width:min(1120px,100%); display:grid; grid-template-columns:minmax(0,800px) 280px; gap:16px; }
+    .board-wrap,.panel { background:#222a2b; border:1px solid #414b46; border-radius:8px; box-shadow:0 12px 36px #0005; }
+    .board-wrap { padding:12px; }
+    .topline { display:flex; align-items:center; gap:10px; margin:0 2px 10px; }
+    /* 56 起页头多了一段种子号，"标题 / 徽章 / 版本"三截挤在一行会把标题压到换行。
+       标题不换行、徽章让它让位（省略号），版本号始终完整可读——它是核对线上版本的唯一凭据。 */
+    .topline h1 { white-space:nowrap; flex:0 0 auto; }
+    .topline .badge { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    h1 { font-size:18px; margin:0; font-weight:650; letter-spacing:.04em; }
+    .badge { color:#b9c6a2; font-size:12px; border:1px solid #59664e; padding:4px 8px; border-radius:99px; }
+    canvas { display:block; width:100%; height:auto; image-rendering:pixelated; border:1px solid #71805b; background:#71805b; cursor:crosshair; }
+    /* 视野容器：地图铺满，小地图压右下角，提示压左下角 */
+    .mapview { position:relative; line-height:0; }
+    #minimap { position:absolute; right:6px; bottom:6px; width:240px; height:180px; border:1px solid #8d9a72; background:#2a3128; cursor:pointer; image-rendering:pixelated; opacity:.92; }
+    #minimap:hover { opacity:1; }
+    #camHint { position:absolute; left:6px; bottom:6px; font-size:10px; line-height:1.5; color:#dfe6d2; background:rgba(15,20,18,.62); padding:2px 6px; border-radius:4px; pointer-events:none; }
+    .legend { display:flex; flex-wrap:wrap; gap:8px 14px; padding:10px 2px 0; color:#c7caba; font-size:12px; }
+    .legend span { display:flex; align-items:center; gap:6px; }
+    .swatch { width:13px; height:13px; border:1px solid #ffffff38; display:inline-block; }
+    .panel { padding:16px; }
+    .panel h2 { font-size:14px; margin:0 0 10px; color:#d9dfc4; }
+    .panel p { font-size:12px; line-height:1.6; color:#b8c0b5; margin:0 0 12px; }
+    .unit-list { display:grid; gap:7px; margin:12px 0 16px; }
+    .unit { border:1px solid #48534a; border-radius:5px; padding:9px 10px; display:flex; justify-content:space-between; align-items:center; background:#293130; cursor:pointer; text-align:left; color:inherit; }
+    .unit:hover { border-color:#a8bb83; }
+    .unit.active { border-color:#e4d48e; box-shadow:inset 3px 0 #e4d48e; background:#35382d; }
+    .unit small { display:block; color:#9eaa9f; margin-top:3px; font-size:11px; }
+    .unit-mark { width:15px; height:15px; border:2px solid #f0e9cb; box-shadow:0 0 0 2px #202724; }
+    .actions { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+    button.action { border:1px solid #59664e; border-radius:5px; background:#333d35; color:#e4e8d8; padding:9px; font:inherit; font-size:12px; cursor:pointer; }
+    button.action:hover,button.action.selected { background:#596b47; border-color:#a9bd83; }
+    button.action.stop { background:#483532; border-color:#77514a; }
+    .status { margin-top:14px; border-top:1px solid #414b46; padding-top:12px; }
+    .status-label { color:#91a883; font-size:11px; margin-bottom:5px; }
+    #statusText { font-size:13px; line-height:1.5; min-height:40px; }
+    #selectedInfo { color:#c6ccb9; font-size:12px; margin-top:8px; white-space:pre-line; }
+    #warInfo { color:#c6ccb9; font-size:12px; margin-top:6px; white-space:pre-line; }
+    .hint { margin-top:16px!important; padding:9px; border-left:2px solid #879568; background:#252d29; }
+    .textcmd { margin:0 0 12px; }
+    .textcmd-row { display:flex; gap:8px; }
+    #cmdInput { flex:1; min-width:0; background:#1c2325; border:1px solid #59664e; border-radius:5px; color:#e8e4d7; padding:8px 9px; font:inherit; font-size:12px; }
+    #cmdInput:focus { outline:none; border-color:#a9bd83; }
+    #cmdEcho { color:#c6ccb9; font-size:12px; line-height:1.55; margin-top:6px; white-space:pre-line; display:grid; gap:5px; }
+    #cmdEcho div:nth-last-child(2) { opacity:.68; }
+    #cmdEcho div:nth-last-child(3) { opacity:.45; }
+    #cmdEcho div:nth-last-child(4) { opacity:.28; }
+    .textcmd.clarify #cmdInput { border-color:#e0c25f; }
+    /* 语音（a 层）：按住说话。状态只改边框与文字，不抢布局 */
+    #voiceBtn { flex:0 0 auto; min-width:52px; }
+    #voiceBtn.arming { border-color:#a9bd83; opacity:.8; }
+    #voiceBtn.recording { border-color:#e0725f; color:#f0b6ab; }
+    #voiceBtn.transcribing { border-color:#e0c25f; color:#efd89a; }
+    #voiceBtn.error { border-color:#c8543f; color:#f0b6ab; }
+    #voiceBtn[disabled] { opacity:.4; }
+    #voiceHint { color:#879568; font-size:11px; line-height:1.5; margin-top:4px; }
+    .cmdlog { margin-top:10px; border-top:1px solid #414b46; padding-top:8px; }
+    .cmdlog-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    #cmdLogStats { color:#9eaa9f; font-size:11px; flex:1; min-width:120px; }
+    .cmdlog-btns { display:flex; gap:6px; }
+    button.action.mini { padding:4px 8px; font-size:11px; }
+    #cmdLogList { max-height:150px; overflow-y:auto; margin-top:6px; display:grid; gap:4px; font-size:11px; line-height:1.5; }
+    #cmdLogList:empty { display:none; }
+    .cmdlog-row { border-left:3px solid #555; padding:2px 8px; background:#252d29; color:#b8c0b5; }
+    .cmdlog-row.ok { border-color:#7fae7a; }
+    .cmdlog-row.partial { border-color:#e0c25f; }
+    .cmdlog-row.fail { border-color:#d97e6a; }
+    .cmdlog-row.clarify { border-color:#e0c25f; }
+    .cmdlog-row.cancel { border-color:#7d8a80; }
+    .cmdlog-row.unsupported { border-color:#a06e5a; }
+    .cmdlog-row.offtopic { border-color:#4a5550; color:#8b948d; font-style:italic; }
+    .cmdlog.collapsed #cmdLogList { display:none; }
+    @media(max-width:900px){.app{grid-template-columns:1fr}.panel{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}.panel h2,.panel>p,.hint{grid-column:1/-1}.unit-list{grid-column:1}.actions{grid-column:2;align-content:start}.status{grid-column:1/-1}}
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="board-wrap">
+      <div class="topline"><h1>冷兵器战术指挥 · 战术演示</h1><span class="badge">士气 / 集结 / 将旗 / 抗命 / 戒备 / 认知 / 巡逻 / 文字命令 / 战争迷雾</span><span id="buildTag" style="margin-left:auto;font-size:11px;opacity:.65;white-space:nowrap">版本加载中</span></div>
+      <div class="mapview">
+        <canvas id="map" width="800" height="600" aria-label="俯视战场地图（主将视野）"></canvas>
+        <canvas id="minimap" width="240" height="180" aria-label="小地图：整个战场全貌，黄框为主将视野；点蓝点可查看该部队"></canvas>
+        <div id="camHint">主视图＝主将视野，不能缩放／平移：点空地＝过去 · 点敌军＝打它 · 全貌看右下小地图 · 小地图点蓝点＝看那支部队 · R 回到主将 · G 整队（主将收编身边友军兵力）</div>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="background:#82935a"></i>平地</span>
+        <span><i class="swatch" style="background:#405a3e"></i>森林</span>
+        <span><i class="swatch" style="background:#477b91"></i>河流</span>
+        <span><i class="swatch" style="background:#b69a63"></i>桥梁</span>
+        <span><i class="swatch" style="background:#6f6a5e"></i>高地（视点 +3：看得远）</span>
+        <span><i class="swatch" style="background:#4e6b62"></i>洼地（视点 −1：看不清对岸）</span>
+        <span><i class="swatch" style="background:#b9a37a"></i>道路</span>
+        <span><i class="swatch" style="background:#478ac2"></i>己方</span>
+        <span><i class="swatch" style="background:#ba594b"></i>敌军</span>
+        <span><i class="swatch" style="background:#9ac77e"></i>簇上方＝生命条，其下＝士气条</span>
+        <span><i class="swatch" style="background:#e8c65a"></i>金框方块＝主将（银框＝随军将领）</span>
+        <span><i class="swatch" style="background:#7d8a80"></i>灰点＝未预期</span>
+        <span><i class="swatch" style="background:#e0c25f"></i>黄点＝有预期（戒备中）</span>
+        <span><i class="swatch" style="background:#e2726a"></i>红杠＝已目视</span>
+        <span><i class="swatch" style="background:#fff2b8"></i>白框闪烁＝措手不及</span>
+        <span><i class="swatch" style="background:#7fae7a"></i>簇右侧竖条＝精力（戒备中转金）</span>
+        <span><i class="swatch" style="background:#3a443c"></i>迷雾＝未探索/薄雾（友军小视野，敌军只显残影）</span>
+        <span style="opacity:.75"><b>主视图就是主将的视野</b>：一屏 26.7×20 格（每格 30 像素），跟着主将走，不能缩放／平移；全貌只在右下小地图上</span>
+        <span style="opacity:.75"><b>短令只喊给画面里的部队</b>：「放箭」「冲锋」「往前走」「驻守」「撤退」「戒备」不点名时只对画面内生效（63 起覆盖全部口令）；画面外的部队要点名（「弓兵队放箭」）。「放箭」不用报目标——打射程内最近的那支</span>
+        <span><i class="swatch" style="background:#e8d99a"></i>营地 ×3~6（<b>每局随机生成</b>，两岸数量差 ≤1）：控住后营内缓慢回血回气（<b>不再是胜利条件</b>）</span>
+        <span><i class="swatch" style="background:#7fb2dc"></i>本营：营内同样回血；被对方占领 → 该方全军士气重挫并持续低迷</span>
+        <span><i class="swatch" style="background:#d68d7c"></i>胜负只看主将：任一方主将阵亡即结束（敌方主将＝本营赤旗那支）</span>
+        <span style="opacity:.75">选中部队后脚下的虚线＝视野环：缺口就是山脊或树冠挡住的方向</span>
+        <span style="opacity:.75">地图（地形/河道/桥数/营地/本营）每局按种子随机生成：<b>刷新页面换一张图</b>；<code>?seed=数字</code> 可固定同一张图</span>
+      </div>
+      <div class="cmdlog" id="cmdLogBox">
+        <div class="cmdlog-head">
+          <span class="status-label">命令日志</span>
+          <span id="cmdLogStats">暂无输入</span>
+          <span class="cmdlog-btns">
+            <button class="action mini" id="cmdLogExport">导出</button>
+            <button class="action mini" id="cmdLogClear">清空</button>
+            <button class="action mini" id="cmdLogToggle">收起</button>
+          </span>
+        </div>
+        <div id="cmdLogList"></div>
+      </div>
+    </section>
+    <aside class="panel">
+      <h2>部队与命令</h2>
+      <p>点击左侧列表或己方兵簇选择部队。选中主将后<b>点地图就下令</b>：点空地＝过去，点敌军＝打它，不用先切模式（鼠标指着哪一格，框会变色：金色＝过去，红色＝打它）。<b>驻守/集结是一次性的</b>，点完一个位置自动回到默认；撤退和“设为将旗”点按钮即执行。也可以直接在下方“文字命令”里输入一句话下令。</p>
+      <div class="textcmd" id="textCmdBox">
+        <div class="status-label" style="margin-bottom:6px">文字命令（与按钮等效，缺信息会追问）</div>
+        <div class="textcmd-row">
+          <input id="cmdInput" autocomplete="off" spellcheck="false" placeholder="如：枪兵队和骑兵队去北桥 · 先去北桥再驻守 · 全军戒备 · 别过河 · 报告">
+          <button class="action" id="cmdButton" style="flex:0 0 auto">下令</button>
+          <button class="action" id="voiceBtn" title="按住说话：松开即识别并下令" style="flex:0 0 auto">🎤 按住</button>
+        </div>
+        <div id="voiceHint"></div>
+        <div id="cmdEcho"></div>
+      </div>
+      <div class="unit-list" id="unitList"></div>
+      <div class="actions">
+        <button class="action" data-mode="DEFEND">驻守</button>
+        <button class="action" data-mode="RALLY">集结</button>
+        <button class="action" data-mode="RETREAT">撤退</button>
+        <button class="action" id="stanceButton">戒备</button>
+        <button class="action" id="commanderButton">设为将旗</button>
+        <button class="action stop" id="stopButton">停止</button>
+        <button class="action" id="absorbButton" title="主将收编周围友军兵力（快捷键 G）：脱离接触、附近无敌军时可用，只抽不走、友军至少留 25%">整队</button>
+      </div>
+      <div class="status">
+        <div class="status-label">战场状态</div>
+        <div id="statusText">选中主将后点地图：空地＝过去，敌军＝打它。</div>
+        <div id="selectedInfo"></div>
+        <div id="warInfo"></div>
+      </div>
+      <p class="hint">士气决定伤害（×0.70 ~ ×1.15）。局部以多打少士气升，被包夹、侧后挨打掉得快，低于 25 溃退、退到后方回到 55 才能归队。<b>集结</b>让多支部队各自就位、同组按最慢者配速，到齐后统一进攻，避免添油。将旗给 8 格内友军 +10 士气，将旗阵亡全军 −25。<b>士气跌到“动摇”（&lt;50）部队会抗命拒战</b>，只能先驻守或撤退休整。高地 +8、森林 −4；驻守 +8，强攻持续 −4，撤退 −6。<br><br><b>戒备</b>是一条命令，也是一种消耗：按“戒备”把选中部队转入戒备，<b>正面视野 8 → 10 格、侧面视野变宽、遭遇时不再发懵</b>；代价是行军速度 ×0.8，且持续烧<b>精力</b>（行军 2.2/秒、驻守 1.4/秒、交战 2.6/秒，方块右侧竖条）。精力低于 35 反应变慢，低于 15 会被强制打回常行，要回升到 30 才能重新戒备——所以“全程戒备”在数学上不成立，你得决定哪一段路值得绷紧。友军通报、听见 12 格内的交战声、刚被打中，也会临时抬高戒备（免费，3 秒自己淡出）。<br><br><b>敌情认知</b>分三档，每支部队只管自己看见的敌人。灰点＝<b>未预期</b>（什么都不知道），黄点＝<b>有预期</b>（在戒备，但没看见人，只有最后目击点），红杠＝<b>已目视</b>（亲眼看见，自动摆正正面、士气 +10；有预期 +4）。遭遇时按<b>严重度</b>结算：完全没准备＝全威力 ×1.5、士气 −20、1–2.5 秒反应不过来；戒备充分＝只剩四成、士气 −8，仍然仓促但不再发懵。<b>情报会在友军间通报</b>（11 格内、双方同一套规则），所以队友被咬住，你也会提前有数；12 格内有人开火，附近部队也能听见枪声、把戒备抬起来。接触中断后戒备逐秒回落，约 12 秒跌回未预期，不会全场永久警觉。<b>森林能藏兵</b>：林中目标要贴到 3 格才暴露，从侧翼林子摸过去是拿先手的主要手段。单次伤害封顶在目标最大生命的 40%，防止叠乘一击秒杀。<br><br><b>文字命令</b>：在右侧输入一句话即可下令，例如“枪兵队和骑兵队去北桥”“全军戒备”“弓兵队攻击敌弓兵”“报告”。系统会回显命令解读（保留最近几条，旧的淡出）；缺部队、地点或目标时追问一句——选项带编号，回答“2”“第二个”或“弓兵”这类兵种名都行，说“取消”放弃。<b>组合句</b>可以排队：“枪兵队先去北桥再驻守”，到位后自动执行下一段。<b>“别过河”</b>让部队只在西岸活动（东岸蒙淡红），说“可以过河”解除。常见错字（如“急结”“警备”）会自动纠正并注明。文字与按钮走同一套校验，抗命、地形限制同样生效。</p>
+    </aside>
+  </main>
+  <!-- 经典 script 标签（非 ES module）：file:// 双击可直接运行，无 CORS 问题。
+       加载顺序是依赖顺序：模拟层 → 命令层 → 界面层 → 装配。 -->
+  <!-- 世界生成：种子 → 地形/河/桥/营地/本营/出生点/巡逻/地标。必须排在 sim.js 之前（sim 依赖它） -->
+  <!-- ?v= 是缓存后缀，**每一轮发版必须全体等于 main.js 的 BUILD 号**（不是"哪个文件改了就升哪个"）。
+       87–95 九轮漏升，线上 A 一度仍是 main.js?v=86，回访玩家会吃到旧 JS——所以由 docver_test [2] 把守。
+       改版本时这条命令一次改完：sed -i 's/\.js?v=[0-9]*/.js?v=<新号>/g' cold_age_demo/index.html -->
+  <script src="worldgen.js?v=99"></script>
+  <script src="sim.js?v=99"></script>
+  <!-- e1 表现层：编制/阵型模板/九兵位次。只读 sim.js 的状态，不回写一个字段；
+       必须排在 sim.js 之后（要读 SIM.TILE / SIM.allUnits / SIM.foesWithin）、ui.js 之前。 -->
+  <script src="troop.js?v=99"></script>
+  <!-- 86：BattleContext（d→b 的事实装配）。必须在 sim.js 之后（要读 SIM.read）、
+       intent.js 之前（初始化时把它注进 b 层）。这一轮只注入，b 层不消费。 -->
+  <script src="battle_ctx.js?v=99"></script>
+  <script src="understand.js?v=99"></script>
+  <!-- c 层子件：副将（对外人格）。必须在 intent.js 之前——命令层的对外出口要用它。
+       e′ 语音层（speech.js）排在副将之前：副将只产出话语对象，出声归它，两层互不认识。 -->
+  <script src="recorder.js?v=99"></script>
+  <script src="speech.js?v=99"></script>
+  <script src="adjutant.js?v=99"></script>
+  <script src="intent.js?v=99"></script>
+  <script src="enemy_commander.js?v=99"></script>
+  <script src="ui.js?v=99"></script>
+  <!-- a 层语音：只产出文本，由 main.js 接到 CMD.submit；与 b/c/d 无代码依赖 -->
+  <script src="voice.js?v=99"></script>
+  <script src="main.js?v=99"></script>
+  <!-- 语义兜底层：ES 模块 + 本地模型文件，需要经本地 http 服务打开才会加载；
+       file:// 直开或文件缺失时静默缺席，demo 自动退回纯规则解析（node 测试即此路径）。 -->
+  <script type="module" src="semantic.js?v=99"></script>
+</body>
+</html>
