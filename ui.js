@@ -296,7 +296,7 @@
       // 薄雾区的部队走 reported()：面板上是信使带回来的旧情报，不是此刻的真值
       const v=S.reported(u);
       const txt=u.hp>0
-        ? `${u.type} · ${u.speed} 格/秒 · ${v.hp}/${v.maxHp} HP · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='GUARDED'?'戒备':'常行'} · ${S.alertWord(v)} · ${v.state}${v.stale>0?` · 情报 ${v.stale.toFixed(1)}s 前`:''}`
+        ? `${u.type} · ${u.speed} 格/秒 · ${v.hp}/${v.maxHp} HP · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='GUARDED'?'戒备':'常行'}${v.forced?'·加速':''} · ${S.alertWord(v)} · ${v.state}${v.stale>0?` · 情报 ${v.stale.toFixed(1)}s 前`:''}`
         : (u.captured ? '被俘' : '阵亡');
       if(b.dataset.txt!==txt){
         b.dataset.txt=txt;
@@ -345,7 +345,8 @@
         const boss=S.commanderOf(u.team);
         if(boss&&boss.hp>0&&!boss.isRouted&&boss!==u&&S.distance(u,boss)<=S.MORALE.AURA_RADIUS)
           extras.push(`将旗光环 +${S.MORALE.AURA}`);
-        extras.push(u.stance==='GUARDED'?`戒备中 精力 ${Math.round(u.stamina)}`:`常行 精力 ${Math.round(u.stamina)}`);
+        // 101：加速行军是档位状态，与戒备并列报（两者可同时开，费用相加）
+        extras.push(`${u.stance==='GUARDED'?'戒备中':'常行'}${u.forced?' · 加速行军':''} 精力 ${Math.round(u.stamina)}`);
         const grp=selection.length>1?`｜编组 ${selection.length} 支`:'';
         const foeName=u.contact?(S.targetById(u.contact.id)||{}).name:'';
         const ago=u.contact&&u.contact.t!=null?Math.max(0,S.simTime-u.contact.t):null;

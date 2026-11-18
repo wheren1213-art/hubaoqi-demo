@@ -66,6 +66,13 @@
     //   兵照常打、照常挨打，只多两件看得见的事：切第七阵型 RUSH、破阵原因写成「全力冲锋」。
     //   没有反向开关，所以下一道普通命令必须复位（97 单向门教训 / A7）。
     RUSH_ON: {op:'STATE', state:'RUSH', on:true, slots:['unitIds'], exec:'setRush(true)＝切冲锋乱锋阵，接战/新令/目标消失即收'},
+    // 101：加速行军＝**行军档位**，不是一次动作。三条与冲锋相反的规矩写在这里：
+    //   ① 跨命令保留（说一次一直有效，不会因为下一道移动令就没了）；
+    //   ② 兵不动的时候不扣费（扣费在移动链上，见 FORCED.DRAIN）；
+    //   ③ 必须有反向命令（FORCED_OFF），否则就是单向门（97 的教训）。
+    //   接战／体力见底由 d 层的 updateForced 收场，c 层不重复判——判据只留一处。
+    FORCED_ON:  {op:'STATE', state:'FORCED', on:true,  slots:['unitIds'], exec:'setForced(true)＝行军档位切常行的 1.2 倍，真走时扣体力 2.0/秒'},
+    FORCED_OFF: {op:'STATE', state:'FORCED', on:false, slots:['unitIds'], exec:'setForced(false)＝回到常速行军'},
     // ── TALK：不是部队操作。不进四类；本轮不投入开发（上司：先不做，不在游戏机制里）──
     //   注意"不开发"不等于"已拆掉"：这三条现在的行为一字未动，只是明确它们不占四类的位置。
     REPORT:    {op:'TALK', slots:[], exec:'statusReport（照旧）'},
@@ -263,6 +270,19 @@
       const first=Object.assign({},cmd,{ops:null,unsupported:(cmd.unsupported||[]).slice()});
       const second=Object.assign({},cmd,{action:'RUSH_ON',ops:null,
         locId:null,dir:null,dist:null,multiLocs:null,
+        unsupported:(cmd.unsupported||[]).slice()});
+      return {steps:[stepOf(first),stepOf(second)]};
+    }
+    // ── 101 加速行军：「去北桥 ＋ 加速行军」这一句话的两段 ────────────────
+    // 与冲锋同形，但**只在本条命令上成立**：档位本身跨命令保留（说一次一直有效），
+    //   所以第二段不是"这一次走快些"，而是"把档位打开"——两段同刻下达，
+    //   第一段（MOVE/ATTACK）走的时候就已经按 1.2 倍算了。
+    // 第二段只带开关：locId/dir/foeId 一律清空，否则 objOf 会把地点/敌人当宾语，
+    //   STATE 的宾语种类对不上，assertPlan 当场红（97/98 同款坑）。
+    if(ops&&ops.length===2&&ops[0]===cmd.action&&ops[1]==='FORCED_ON'){
+      const first=Object.assign({},cmd,{ops:null,unsupported:(cmd.unsupported||[]).slice()});
+      const second=Object.assign({},cmd,{action:'FORCED_ON',ops:null,
+        locId:null,dir:null,dist:null,multiLocs:null,foeId:null,
         unsupported:(cmd.unsupported||[]).slice()});
       return {steps:[stepOf(first),stepOf(second)]};
     }
@@ -1412,7 +1432,7 @@
     //   这也顺手统一了 62 留下的两种口径（那时「放箭」取画面全部、「戒备」却要追问一句）。
     const SCOPE_VERB={ATTACK:'放箭',MOVE:'去北桥',DEFEND:'驻守',RETREAT:'撤退',STANCE_ON:'戒备',
       STANCE_OFF:'转常行',CAPTURE:'占领营地',RALLY:'到北桥集合',RECON:'去侦察',FOLLOW:'跟着我',
-      GUARD_ME:'护驾',STOP:'原地停止'};
+      GUARD_ME:'护驾',STOP:'原地停止',FORCED_ON:'加速行军',FORCED_OFF:'转常速'};
     const unitless=!cmd.unitIds.length||cmd.subjectAuto;              // 没点名（"全军"有 ALL，算点名）
     const scoped=cmd.action!=='REPORT'&&!!SCOPE_VERB[cmd.action]&&unitless;
     // 战斗口令（放箭/冲锋）与其它短令的区别，63 定：
@@ -1537,12 +1557,34 @@
         return {status:st,interp:orderText(ord),feedback:lastToast()};
       }
       case 'RUSH_ON':{
-        // 98：只改形态，不动位置、不改速度。目标从 planOf 第二段保留的 foeId 带来。
+        // 98：只改形态，不动位置。100 轮起真加速（+50%）并烧体力，目标从 planOf 第二段保留的 foeId 带来。
         const foe=cmd.foeId?sim.enemies.find(e=>e.id===cmd.foeId):null;
         const r=sim.setRush(list,true,false,foe?foe.id:null);
         const ns=notes().slice();
-        ns.push('全力冲锋：队形散成乱锋，接战或另下一令即收；本轮不加速，也不加减战力');
+        ns.push('全力冲锋：速度 +50%、起手提气；代价是体力 4/秒、阵型散开，接战或另下一令即收');
         const ord=orderOf({who:list,act:'全力冲锋',tgt:foe?foe.name:null,notes:ns});
+        const st=r.n>0?'EXECUTED':'FAILED';
+        emit(src, ord, st, lastToast());
+        return {status:st,interp:orderText(ord),feedback:lastToast()};
+      }
+      case 'FORCED_ON':{
+        // 101：行军档位。取真值写进回执，不把 1.2／2.0 抄成两处字——
+        //   数值口径只有 d 层一处（85/98 都吃过"改一个数要改五处文案"的亏）。
+        const r=sim.setForced(list,true);
+        const mult=sim.FORCED?sim.FORCED.SPEED_MULT:1.2;
+        const drain=sim.FORCED?sim.FORCED.DRAIN:2;
+        const ns=notes().slice();
+        ns.push(`加速行军：常行的 ${mult} 倍速度；代价是行军途中体力 ${drain}/秒，接战或体力见底自动转回常行`);
+        const ord=orderOf({who:list,act:'加速行军',notes:ns});
+        const st=r.n>0?'EXECUTED':'FAILED';
+        emit(src, ord, st, lastToast());
+        return {status:st,interp:orderText(ord),feedback:lastToast()};
+      }
+      case 'FORCED_OFF':{
+        const r=sim.setForced(list,false);
+        const ns=notes().slice();
+        ns.push('回到常速行军（常行的 1 倍），行军途中不再扣体力');
+        const ord=orderOf({who:list,act:'转常速行军',notes:ns});
         const st=r.n>0?'EXECUTED':'FAILED';
         emit(src, ord, st, lastToast());
         return {status:st,interp:orderText(ord),feedback:lastToast()};

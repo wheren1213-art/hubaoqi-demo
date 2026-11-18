@@ -9,7 +9,7 @@
   // ── 版本指纹：判断「这是哪一版 / 线上跑的是哪一版」只认这一个值 ──────────────
   // 页头右上角显示的就是它，浏览器控制台敲 `BUILD` 也能读到。
   // 改版本时改这里，并在 HANDOFF §5 记一行、同步根目录 CURRENT.md。
-  const BUILD = '2026-11-13 99';
+  const BUILD = '2026-11-18 101';
   try { if (typeof window !== 'undefined') window.BUILD = BUILD; } catch (_) {}
   try {
     const el = document.getElementById('buildTag');

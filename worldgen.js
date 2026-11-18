@@ -464,7 +464,11 @@
     if (redEast) {
       // 巡防区**必须盖住本营**：守备队（主将＋护卫）就驻在营里，
       //   区把它排除在外，越区检查会天天报"守备队擅离防区"——它其实一步没动。
-      const x2 = Math.min(cols - 6, Math.round(redBase.x2) + 2);
+      // 2026-11-17（100 轮）**真缺陷**：原来是 `cols - 6`，而本营的东沿本来就在 cols-3 附近，
+      //   地图放大到 224 宽之后 `cols-6` 落在**本营内部**——区没盖住营，守备队站在营里
+      //   （x=219 > 218）就被判成"擅离防区"。上面那条注释讲的就是这件事，但公式自己犯了。
+      //   改成 `cols - 2`（与坐标 clamp 的上界一致），保证区一定盖住整座本营。
+      const x2 = Math.min(cols - 2, Math.round(redBase.x2) + 2);
       const x1 = Math.max(Math.round(runAt(rc).x2 + 3), x2 - 40);
       pz = { x1, x2: Math.max(x1 + 16, x2), y1: py1, y2: py2 };
     } else {

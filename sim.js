@@ -16,7 +16,11 @@
   //   同时双方各 8 支（`ARMY_BLUE`/`ARMY_RED`），接战从"一波"变成"两波"。
   //   **这只是 demo 玩法验证参数，不是产品定义**（`PROJECT_REQUIREMENTS.md` 不改）。
   // **要再改档只动 cols/rows**（56 起地图内容由 worldgen 按种子生成，没有第二处要改）。
-  const MAP = { cols: 160, rows: 120 };
+  // 2026-11-17（100 轮）：**160×120 → 224×168**（2 倍面积）。上司定「理想对局 5–10 分钟」，
+  //   实测这一档把首交火从 31 秒推到 ~69 秒、横穿多出的行军时间直接进总时长；
+  //   配合伤害 ÷3（见 攻击缩放倍率）才落进 4–9 分钟。**单改地图不够**：只放大 1.4 倍时中位仅 224 秒。
+  //   世界生成的特征半径按 `SC=sqrt(面积/4800)` 自动放大，桥/营地数量仍是 2~4 / 3~6（没跟着加）。
+  const MAP = { cols: 224, rows: 168 };
 
   // ── 双方编成（2026-11-03 demo 81：5 支 → 8 支，仍然**完全同构**）──────────────
   // 为什么加：实测一局只有 80 秒（`.workbuddy/play_probe.js`），兵力是拉长战斗最直接的一档。
@@ -65,7 +69,7 @@
       //   所以全军统一上限 = 16 × 100 = 1600。这两个数是口径，不是随便填的量级；
       //   校验上限配置() 会机检「统一上限 === 场地单位数 × 每单位兵力」，改一个就得改另一个。
       场地单位数: 16,
-      每单位兵力: 100,
+      每单位兵力: 200,
       画面兵数随兵力: true,         // 问 2：目标口径。现行 troop.js fillCount() **已实现**，见下方说明
       画面兵数映射: null,           // 未定：现行是按兵力比例线性取整、最少 1 个、有将再减 1；换形状时填函数位
       兵力只允许整数: true,         // 问 3：目标口径
@@ -82,7 +86,14 @@
       // 2026-11-13 上司拍板：「攻击倍率先按 10 倍」。攻击、回血都按这个倍率走，
       //   它**不是终值**：改这一格要连带改 ARMY_ALL 的 damage 与两处 HEAL（三处必须同倍率）。
       //   存量（兵力上限 1600）不再与流量同倍率——这是上司明确选的口径，不是算错。
-      攻击缩放倍率: 10,
+      // 2026-11-17 改成 **×5**：上司拍板「26 秒就累太快，对局时间可以加长」。
+      //   流量整体减半、存量翻倍（3200）→ 六局中位从 56.6 秒拉到 70.3 秒，体力才有地方产生行为。
+      // 2026-11-17 同日再降到 **5/3（≈1.67）**：上司定「理想对局 5–10 分钟，在地图尺寸和伤害上改」。
+      //   实测（六局，A 档全军压上）：单改地图 224×168 → 224 秒；地图＋伤害 ÷3 → 中位 ~220–250 秒，
+      //   「主将留后」的稳打法 220–520 秒。**取整说明**：弓 4×5/3=6.67 落到 **7**（+5%），
+      //   所以倍率没法用整数，测试改成容差比对（取整差不能当成错）。
+      //   **三处必须一起改**（damage / SITE.HEAL / BASE.HEAL），漏一处就是「营地内打不死」。
+      攻击缩放倍率: 5 / 3,
       攻击缩放状态: '暂定',
     },
     兵力: {
@@ -92,7 +103,11 @@
       //   改这一格即全军一起变（问 5：正式数值与将领加成一起定）。
       // 2026-11-12 上司单独拍板：不再是「过渡沿用值」，而是正式数值 1600。
       //   口径：**16 个画面兵位 × 每兵位 100 兵力 = 1600**；改场地单位数或每单位兵力，这里必须同步改。
-      统一上限: 1600,
+      // 2026-11-17 改成 **3200**（16 × 200）：上司拍板「26 秒就累太快，对局时间可以加长」。
+      //   **为什么改存量而不是继续砍流量**：实测把伤害砍到 1/3 后时长只从 56.6 涨到 60.9 秒——
+      //   死得慢→更多部队同时在场→总输出被补回来，砍伤害是自我抵消的。加长时长只能加总血量。
+      //   画面**不变**：兵位仍是 16 个、渲染按比例，每兵位代表的人数从 100 变 200。
+      统一上限: 3200,
       额外兵力来自将领加成: true,   // 已定口径（不是数值）：身份不进上限表
       // 第三条：将领数值 → 兵力上限加成。公式位留空，不写任何常数／系数。
       上限加成公式: null,          // 未定：函数位，输入（将领数值, 兵种），输出加成兵力
@@ -326,14 +341,14 @@
   //   所以这里不再有"攻击放大要反向缩士气系数"的联动——士气与伤害彻底解耦，只留
   //   「士气高打得狠」这一个方向（见 attack 里的 zeal）。
   const ARMY_ALL = [
-    { id:'INF',  name:'主将队',   type:'枪兵', speed:3,   上限键:'枪兵',   range:1, damage:60, cooldown:1, role:'commander', person:null },
-    { id:'ARC',  name:'弓兵队',   type:'弓兵', speed:2.5, 上限键:'弓兵',   range:5, damage:40, cooldown:1.5 },
-    { id:'CAV',  name:'骑兵队',   type:'骑兵', speed:4.5, 上限键:'骑兵',   range:1, damage:90, cooldown:1.2 },
-    { id:'INF2', name:'枪兵队乙', type:'枪兵', speed:3,   上限键:'枪兵',   range:1, damage:60, cooldown:1   },
-    { id:'INF3', name:'枪兵队丙', type:'枪兵', speed:3,   上限键:'枪兵',   range:1, damage:60, cooldown:1   },
-    { id:'ARC2', name:'弓兵队乙', type:'弓兵', speed:2.5, 上限键:'弓兵',   range:5, damage:40, cooldown:1.5 },
-    { id:'CAV2', name:'骑兵队乙', type:'骑兵', speed:4.5, 上限键:'骑兵',   range:1, damage:90, cooldown:1.2 },
-    { id:'INF4', name:'枪兵队丁', type:'枪兵', speed:3,   上限键:'枪兵',   range:1, damage:60, cooldown:1   },
+    { id:'INF',  name:'主将队',   type:'枪兵', speed:3,   上限键:'枪兵',   range:1, damage:10, cooldown:1, role:'commander', person:null },
+    { id:'ARC',  name:'弓兵队',   type:'弓兵', speed:2.5, 上限键:'弓兵',   range:5, damage:7, cooldown:1.5 },
+    { id:'CAV',  name:'骑兵队',   type:'骑兵', speed:4.5, 上限键:'骑兵',   range:1, damage:15, cooldown:1.2 },
+    { id:'INF2', name:'枪兵队乙', type:'枪兵', speed:3,   上限键:'枪兵',   range:1, damage:10, cooldown:1   },
+    { id:'INF3', name:'枪兵队丙', type:'枪兵', speed:3,   上限键:'枪兵',   range:1, damage:10, cooldown:1   },
+    { id:'ARC2', name:'弓兵队乙', type:'弓兵', speed:2.5, 上限键:'弓兵',   range:5, damage:7, cooldown:1.5 },
+    { id:'CAV2', name:'骑兵队乙', type:'骑兵', speed:4.5, 上限键:'骑兵',   range:1, damage:15, cooldown:1.2 },
+    { id:'INF4', name:'枪兵队丁', type:'枪兵', speed:3,   上限键:'枪兵',   range:1, damage:10, cooldown:1   },
   ];
   const ARMY = (globalThis.__SIM_CFG__ && globalThis.__SIM_CFG__.perSide)
     ? ARMY_ALL.slice(0, Math.max(1, Math.min(ARMY_ALL.length, globalThis.__SIM_CFG__.perSide)))
@@ -431,8 +446,9 @@
   const CAPTURE_TIME = 10;       // 单独控制一处营地到"拿下"的秒数（进度条按它算）
   const SITE = {
     CAMP: 1,        // 营地范围＝矩形外扩几格：5 支部队要能一起站进营地
-    HEAL: 26,          // 营内每秒回血（2026-11-13 随攻击倍率 ×10）。满编 1600 要约 62 秒——
+    HEAL: 13 / 3,      // 营内每秒回血（＝旧值 2.6 × 攻击倍率 5/3）。满编 3200 要 738 秒——
                     //   回血不再与兵力上限同倍率，驻营补给变慢，实测以六局基线为准
+                    //   **必须与攻击同倍率**：只降伤害不降回血，等于营地内单刀 26/秒打不动 26/秒的回血
     MORALE: 8,      // 营内士气基准加成（与驻守 +8 同量级：营地是加强版阵地）
     DECAY: 2        // 无人时控制度回落倍率
   };
@@ -441,7 +457,7 @@
   const BASE = {
     CAPTURE_TIME: 8,    // 敌方单独站在本营里多久算攻破（比营地快：本营没人守本来就不该久撑）
     DECAY: 1.5,         // 被打断后的回落倍率
-    HEAL: 26,             // 本营内每秒回血（54 新增，2026-11-13 随攻击倍率 ×10）。与营地同速率——**家门口是补给点，不是堡垒**
+    HEAL: 13 / 3,         // 本营内每秒回血（54 新增；＝2.6 × 攻击倍率 5/3）。与营地同速率——**家门口是补给点，不是堡垒**
     //                    为什么必须给：53 的"整补"意图回营后回不了血，只剩"停止主动进攻"，
     //                    玩家也不动时整局僵住（实测 150 秒零接触）。没有恢复的撤退＝永久龟缩。
     // MORALE_LOSS（一次性 -32）已于 2026-11-13 删除：它与下面的 MORALE_HOLD 是同一件事的
@@ -591,10 +607,32 @@
   };
   // 精力：戒备唯一的成本。它只管两件事——还能不能维持戒备、反应有多快。
   // 不去扣士气和伤害，免得玩家读不懂是哪个变量在杀他。
+  // ── 精力（体力）＝独立资源 ──────────────────────────────────────────
+  // 2026-11-17 上司拍板：体力是**独立资源**，不是「戒备的使用费」。消耗按动作多源叠加，
+  //   同一帧同时发生就**相加**（冲锋＋戒备＋交战 = 5.6/秒），不取最大。
+  //   ① 交战本身耗（任何姿态，以前常行交战反而 +0.8/秒，等于打架比站着歇更省力，逻辑是反的）
+  //   ② 戒备是**附加**项（分相位：驻守便宜、推进贵、打起来只为「不慌」付费）
+  //   ③ 全力冲锋最贵，按上司要求比加速行军（2.0）快一倍
+  //   常行行军**不耗也不回**；只有静止才回——否则「戒备→行军→戒备」会成永动机。
+  // 加速行军（2.0/秒，101 落地）不在本表：它只在**真走**的时候收，属于移动链那一侧，
+  //   常量在 FORCED.DRAIN。写进这张分相位表里会被"静止也扣"误伤。
   const STAMINA = {
     MAX: 100,
-    DRAIN: {move:2.2, still:1.4, fight:2.6},     // 戒备中每秒消耗
-    RECOVER: {move:1.5, still:4, fight:.8},      // 常行时每秒回复
+    // **速率必须跟着对局时长走**（2026-11-17 同日二次校准）：对局从 70 秒拉到 2–5 分钟后，
+    //   原 2.6/秒 的交战消耗让 35% 的样本贴底（<15 占 35.3%），"疲劳"从稀缺变成常态，反而不构成决策。
+    //   校准目标：一支持续交战的部队约 100 秒到疲态线（35）、约 130 秒见底——对局里能发生一次，不是全程。
+    FIGHT: .7,        // 交战基础：交战中任何姿态都扣。持续交战约 100 秒到疲态线（35）、约 140 秒见底
+    GUARD: {move:1.0, still:.8, fight:.3},   // 戒备附加（交战相位低：视野已无用，只为挨打不慌付费）
+    CHARGE: 4.0,      // 全力冲锋（u.rush）：一次 7 秒的冲锋约 28 点，冲三次见底
+    // 常行行军给 **0.5/秒** 的慢回复（原 0）：对局变长后必须留出"撤下来喘气"的循环，
+    //   否则交战段一路到底、中途无法恢复，体力就退化成一次性的计时器。
+    //   **仍不是永动机**：戒备行军净 −1.2/秒、戒备交战净 −1.4/秒，任一种都比回的快。
+    RECOVER: {move:0.5, still:3.0, fight:0},
+    // 「还在打」的记忆长度（秒）。**必须比士气的 ENGAGE_MEMORY=3 长**：
+    //   实测只按 3 秒算时，扣体力的样本只占 5.6%——交火是间歇的，3 秒一过就判"停下"，
+    //   立刻按 3/秒 回，消耗被抹平，六局里 <35 的样本只有 1.5%，等于体力条还是不动。
+    //   10 秒覆盖两三轮齐射间隔，让"在火线上"这段时间持续计费。
+    ENGAGE_MEM: 10,
     TIRED: 35,        // 低于此值反应延迟 ×1.5
     TIRED_REACT: 1.5,
     FORCE_DROP: 15,   // 低于此值强制打回常行
@@ -649,6 +687,11 @@
     ALLY_LOST: -8,     // 友军被击破（歼灭，兵没了）
     ALLY_ROUT: -4,     // 友军溃退（脱离控制但兵还在，能重整回来）
     LEADER_LOST: -15,  // 将领被击破（主将与副将同一档；主将阵亡时本局已结束，扣不扣看不见）
+    // ── 事件：全力冲锋（100 轮，上司 2026-11-17：「一定时间内增加士气」）──────
+    //   起手一次性提气，之后按 UP（0.2/秒）回落——所以是「一定时间内」，不是永久。
+    //   **如实记账**：士气稳态实测锁在 ~99，这一下撞顶后有效增量很小，伤害端约 2–3%；
+    //   冲锋的收益主体仍是速度 +50%，士气这条挂在「士气失灵」老账下，别当它已生效。
+    CHARGE: 12,
     // ── 门槛与换算（本轮不动）───────────────────────────────
     BONUS: .45,        // 伤害系数 = 0.7 + BONUS × 士气/100（满士气 1.15，崩溃 0.7）
     DEFY_AT: 50,       // 士气低于此值（动摇及以下）会抗命，拒绝进攻
@@ -942,6 +985,8 @@
       state: u.state, stance: u.stance, alert: u.alert, isRouted: !!u.isRouted,
       guard: u.guard, pathLen: u.path.length, reactTimer: u.reactTimer,
       formation: u.formation, leader: u.leader,
+      // 101：加速行军是**看得见的状态**（否则玩家不知道档位还开着，等于单向门）
+      forced: !!u.forced,
       advancing: u.goal ? u.goal.dir : null, stop: u.lastStopReason || null,
       contact: u.contact || null, stale: 0
     };
@@ -1035,6 +1080,9 @@
       //   `rush` 给 troop.pickFormation 读（切第七阵型）；`rushTarget` 给「目标没了就收场」用。
       //   两者都放在部队上（与 captureMode 同处），不放命令层——87：别让 b 层拿到 undefined。
       rush:false,rushTarget:null,
+      // 101：加速行军是**行军档位**（1.2 倍），不是一次动作。跨命令保留，
+      //   直到喊停／接战／体力见底。与 rush 的区别写死在 FORCED 的注释里。
+      forced:false,
       // ⑸9 的九兵位次 / 队形朝向 / 队形名 **67 起不在这里**：
       //   它们是动画状态，归 troop.js（e1）自己用 WeakMap 持有，单位记录上不留一份。
       patrol:null,patrolIdx:0,patrolWait:0,avoid:null,goal:null,lastStopReason:null,
@@ -1610,12 +1658,15 @@
       : `${live.length} 支部队解除活捉，照常击杀。`);
     return {n:live.length};
   }
-  // ── 全力冲锋（98，Q36/Q38/Q40）──────────────────────────────────────
-  // Q38 上司拍板「本轮不加速」：+50% 速度却零代价会严格占优，把 Q32 要区分的
-  //   「正常进攻」抹平。这个数是**显式占位**，等挂账 19 给「破阵」做出真实代价才允许改；
-  //   本轮没有任何一行读它（读了也是乘 1.0，等于留个假钩子骗后来人）。
-  const RUSH = { SPEED_MULT: 1.0 };
-  // 开关：只改状态与画面，不改速度、不进伤害公式（Q40）。
+  // ── 全力冲锋（98，Q36/Q38/Q40；100 轮起真加速）─────────────────────
+  // 2026-11-17 上司拍板：冲锋要**有收益也有减益**。
+  //   收益：速度 +50%（这里）、一定时间内加士气（见 setRush 的 changeMorale）。
+  //   减益：消耗体力（STAMINA.CHARGE 4.0/秒）、破坏阵型（breakFormation，6 秒后自动重整）。
+  // 98 时不加速的理由是「+50% 速度却零代价会严格占优」——现在代价有了，可以开这一格。
+  // **阵型收益未定**：`FORMATION.BONUS` 仍是 1.0，所以「破阵」今天还不是真代价，
+  //   冲锋的实际成本目前只有体力。这条不解决，冲锋可能偏强，见 ROADMAP 挂账。
+  const RUSH = { SPEED_MULT: 1.5 };
+  // 开关：改速度、给一次性士气、破阵型、烧体力（100 轮起）。**不进伤害公式**（Q40 不变）。
   //   on 时顺手 breakFormation，让状态栏/formationWhy 说清「这队散了是因为全力冲锋」；
   //   REGAIN_SEC=6 的恢复仍走 updateFormation，复用现成计时，不另起一套。
   function setRush(list,on,silent,target){
@@ -1627,10 +1678,13 @@
     for(const u of live){
       u.rush=!!on;
       u.rushTarget=on?(target||null):null;
-      if(on)breakFormation(u,'全力冲锋');
+      if(on){
+        breakFormation(u,'全力冲锋');
+        changeMorale(u,MORALE.CHARGE);   // 起手提气；之后按 0.2/秒 回落＝「一定时间内」
+      }
     }
     if(!silent)toast(on
-      ? `${live.length} 支部队改为全力冲锋：队形散成乱锋，接战即收；本轮不加速。`
+      ? `${live.length} 支部队改为全力冲锋：速度 +50%、起手提气，代价是体力 4/秒与阵型散开，接战即收。`
       : `${live.length} 支部队收起冲锋，回正常阵型。`);
     return {n:live.length};
   }
@@ -1653,6 +1707,42 @@
     const engaged=!!t&&t.hp>0&&distance(u,t)<=u.range;
     if(engaged||gone||u.hp<=0||u.isRouted)setRush([u],false,true);
   }
+  // ── 加速行军（101）────────────────────────────────────────────────
+  // 2026-11-17 上司定的三个档位：常行 ×1.0（不耗）、加速 ×1.2（2.0/秒）、冲锋 ×1.5（4.0/秒）。
+  //   100 收了前两项、只落了冲锋；101 把加速补齐。
+  // **它与冲锋是两种东西，别再混**：
+  //   冲锋＝这一道攻击令的形态（接战即收、下新令即复位、破阵），是一次性动作；
+  //   加速＝"接下来怎么走路"（跨命令保留，兵不动时不扣费，接战/体力见底才收）。
+  //   所以它必须有一条**反向命令**，否则就是单向门（97 的教训）。
+  // **与戒备可叠加**：×1.2×0.8＝0.96，仍比常行快一点——两头都要就两头付费（戒备 1.0 + 加速 2.0）。
+  const FORCED = { SPEED_MULT: 1.2, DRAIN: 2.0 };
+  function setForced(list,on,silent){
+    // 打开只认能走的活部队（崩了的部队不该挂着档位）；复位不筛——
+    //   与 setRush 同一条理由：筛掉会留下永远清不掉的残留状态。
+    const live=on?list.filter(u=>u&&u.hp>0&&!u.isRouted):list.filter(Boolean);
+    if(!live.length)return {n:0};
+    for(const u of live)u.forced=!!on;
+    if(!silent)toast(on
+      ? `${live.length} 支部队改为加速行军：常行的 1.2 倍速度，代价是行军途中体力 2/秒；接战、体力见底或下令转常速才收。`
+      : `${live.length} 支部队回到常速行军。`);
+    return {n:live.length};
+  }
+  // 三种收场（到达终点**不**收：档位说的是"以后怎么走"，不是"这一趟"）：
+  //   ① 接战：火线上没有"加速赶路"这回事。注意这不是为了"防重复扣费"——
+  //      `staminaPhase` 一旦进 `fight` 就不再是 `move`，那一行本来就不会计费；
+  //      收掉它是行为约定：档位只管赶路，打起来就该由交战那套接管（也别让它悄悄冻在那儿）。
+  //   ② 体力 ≤ FORCE_DROP(15)：这是"永远加速"不成立的最后一道闸，与戒备的强制掉档同一条线。
+  //   ③ 阵亡/溃退：不能给崩了的部队挂着档位。
+  function updateForced(u){
+    if(!u||!u.forced)return false;
+    const low=u.stamina<=STAMINA.FORCE_DROP;
+    if(isEngaged(u)||low||u.hp<=0||u.isRouted){
+      setForced([u],false,true);
+      if(low&&u.hp>0&&!u.isRouted)toast(`${u.name}体力见底，加速行军自动转回常行。`);
+      return true;
+    }
+    return false;
+  }
   // 问答通道与报告用的状态快照（c 层不读单位内部字段）
   // 状态快照（c 层汇报用）：走 reported()，所以薄雾区的部队回的是"信使刚带回来的旧情报"。
   // stale > 0 表示这份数据是 lag 秒前的；调用方（副将）必须把这件事说出来，不能假称实时。
@@ -1665,6 +1755,7 @@
         lastStopReason:v.stop||null,
         hp:v.hp,maxHp:v.maxHp,morale:Math.round(v.morale),
         stamina:Math.round(v.stamina),stance:v.stance,alert:v.alert,
+        forced:!!v.forced,
         x:Math.round(v.x),y:Math.round(v.y),
         stale:v.stale||0
       };
@@ -2834,16 +2925,36 @@
     return Math.abs(u.guard-before)>1e-4;
   }
   // 精力只看当前在干什么：行军、驻守还是交战
+  //   **「交战」只认与伤害结算同源的 lastFightAt**，不许拿 `targetId` 代判：
+  //   orderAttack() 在下令那一刻就赋 targetId，人还在 30 格外就开始烧体力——
+  //   这是 98 在 updateRush 上踩过的同一个坑，换了个函数又长出来了。
+  //   记忆长度用 STAMINA.ENGAGE_MEM（10 秒），**故意与士气的 3 秒不同**：见那里的注释。
   function staminaPhase(u){
     if(u.hp<=0)return 'still';
-    if(u.state==='交战'||u.targetId)return 'fight';
+    const t=u.lastFightAt;
+    if(t!=null && t>=0 && simTime-t < STAMINA.ENGAGE_MEM)return 'fight';
     if(u.path.length)return 'move';
     return 'still';
+  }
+  // 体力消耗**多源叠加**（2026-11-17）：返回这一帧每秒扣多少，0 表示该回复。
+  //   摔过的地方：旧版只有 `stanceOn` 一个口，不戒备就永远满体力——1 秒都没掉过。
+  function staminaDrain(u){
+    const phase=staminaPhase(u);
+    let d=0;
+    if(phase==='fight')d+=STAMINA.FIGHT;        // 交战本身，不问姿态
+    if(stanceOn(u))d+=STAMINA.GUARD[phase];     // 戒备附加
+    if(u.rush)d+=STAMINA.CHARGE;                // 全力冲锋
+    // 加速行军：**只在真走的时候收**（与"兵不动就不该付费"一致）。停下＝回到 0，
+    //   按 RECOVER[still]=3.0 回体力——这就是"加速两段路、中间歇一歇"能成立的原因。
+    //   正在冲锋时不叠加：速度没叠（见移动链），费用也不该叠，否则同一段路收两份钱。
+    if(u.forced&&!u.rush&&phase==='move')d+=FORCED.DRAIN;
+    return d;
   }
   function updateStamina(u,dt){
     if(u.hp<=0)return false;
     const phase=staminaPhase(u);
-    if(stanceOn(u))u.stamina=Math.max(0,u.stamina-STAMINA.DRAIN[phase]*dt);
+    const drain=staminaDrain(u);
+    if(drain>0)u.stamina=Math.max(0,u.stamina-drain*dt);
     else u.stamina=Math.min(STAMINA.MAX,u.stamina+STAMINA.RECOVER[phase]*dt);
     // 精力见底就强制掉档：这是"永远戒备"不成立的最后一道闸
     if(u.stance==='GUARDED'&&u.stamina<=STAMINA.FORCE_DROP){
@@ -3131,6 +3242,12 @@
           }
           // 戒备的即时代价：走得慢。防止"一边满速扑上去一边享戒备收益"
           if(u.stance==='GUARDED')baseSpeed*=.8;
+          // 全力冲锋的即时收益：速度 +50%。代价在别处收（体力 4/秒 + 破阵），这里只管快。
+          //   与戒备可叠加（×1.5×0.8=1.2）——"又要快又要戒备"本来就该两头付费。
+          if(u.rush)baseSpeed*=RUSH.SPEED_MULT;
+          // 101 加速行军：常行的 1.2 倍。**与冲锋不叠乘**（1.8 倍没人定过，只会让冲锋失去存在理由）：
+          //   已经在冲就以冲锋为准，加速那一档被盖住、也不再单独扣 2.0。
+          else if(u.forced)baseSpeed*=FORCED.SPEED_MULT;
           const fractionPerSecond=baseSpeed*factor/stepLength;
           const timeNeeded=(1-u.progress)/fractionPerSecond;
           if(timeLeft<timeNeeded){u.progress+=fractionPerSecond*timeLeft;timeLeft=0;}
@@ -3174,6 +3291,9 @@
 
       // 98（Q40）：全力冲锋的三种收场，与阵型状态同在 20Hz 逻辑步里推进。
       for(const u of allUnits)updateRush(u);
+      // 101：加速行军的三种收场（接战／体力见底／溃退）。排在精力结算之后，
+      //   这样"体力刚好掉到 15 以下"这一步就能当场收回档位，不用多等一帧。
+      for(const u of allUnits)updateForced(u);
       // 3.4) 阵型状态：只记"成阵/散阵"，本轮不进任何数值（见 FORMATION.BONUS 的占位说明）
       for(const u of allUnits)updateFormation(u,dt);
       // 3.45) 编制（⑸9）的九兵位次 **67 起不在这里推进**：它归 troop.js（e1），
@@ -3660,7 +3780,7 @@
     // 认知与状态更新（aware_test 探针直接调用）
     firstContact,updateAwareness,propagateWarnings,directionTo,turnToward,attack,
     enemyThink,patrolStep,clampToZone,findBackoffCell,unitThink,
-    updateGuard,updateStamina,staminaPhase,updateMorale,changeMorale,startRout,rallyUnit,
+    updateGuard,updateStamina,staminaPhase,staminaDrain,updateMorale,changeMorale,startRout,rallyUnit,
     surroundDirections,checkRally,collectSlots,
     // 命令执行器：鼠标与文字/语音共用的统一入口（c↔d 契约，见上方注释块）
     orderMove,orderDefend,orderRetreat,orderAttack,orderAttackGroup,orderAdvance,
@@ -3670,8 +3790,10 @@
     condMet,setHoldFire,exposed,setArmed,foeMatchesKind,watchersOf,
     groupAssign,ringPositions,stanceUnitsOn,stanceUnitsOff,stopUnits,retreatUnits,absorbNear,
     setRiverBan,setCapture,CAPTURE,resolveCapture,captureRoll,
-    // 98：全力冲锋开关与 Q38 的显式占位常量（本轮没有任何一行读 SPEED_MULT）
+    // 98：全力冲锋开关；100 轮起 SPEED_MULT 真被移动链读（+50%），不再是占位
     RUSH,setRush,
+    // 101：加速行军档位（×1.2、行军途中 2.0/秒）。与 RUSH 并列导出，方便测试与 c 层回执取真值
+    FORCED,setForced,
     rallyPoint,statusReport,orderHoldFire,engage,kiteBack,investigate,patrolStep,turnToward,directionTo,objCenter,patrolZone,advanceTo,attackMove,followUnit,retreatTo,followStep,computeFog,getFog,enemyFogState,FOG,
     // 64：迷雾重算计数（只给渲染当缓存键用，不参与任何判定）。挂错对象会让迷雾图只建一次就冻住。
     get fogVersion(){ return fogVersion; },
