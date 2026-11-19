@@ -197,7 +197,8 @@
   //   否则包围盒和兵对不上：点选会挑错部队、血条会飘在兵外面。
   function anchorOf(u, ax, ay) {
     const T = tile();
-    if (ax == null) { ax = (u.x + .5) * T; ay = (u.y + .5) * T; }
+    // 104：没传锚点时用**连续坐标**——判定格每半格翻一次，拿它锚定会让整簇跳一格。
+    if (ax == null) { ax = ((u.cx == null ? u.x : u.cx) + .5) * T; ay = ((u.cy == null ? u.y : u.cy) + .5) * T; }
     const st = stateOf(u);
     return { x: ax + st.off.x, y: ay + st.off.y };
   }
@@ -284,7 +285,12 @@
       const st = stateOf(u);
       const engaged = isEngaged(u);
       let tx = 0, ty = 0;
-      if (!engaged && u.path && u.path.length) { const n = u.path[0]; tx = n.x - u.x; ty = n.y - u.y; }
+      // 行军朝向看"还差多少格"：104 起判定格是最近格，翻格那一刻 u.x 会等于 path[0]，
+      //   差变成 (0,0) → 落到 facingVec 的兜底、整队朝东闪一下。所以这里读**连续坐标**。
+      if (!engaged && u.path && u.path.length) {
+        const n = u.path[0];
+        tx = n.x - (u.cx == null ? u.x : u.cx); ty = n.y - (u.cy == null ? u.y : u.cy);
+      }
       if (!tx && !ty) { const d = SIM.facingVec(u.facing); tx = d[0]; ty = d[1]; }
       const len = Math.hypot(tx, ty) || 1;
       const want = Math.atan2(ty / len, tx / len);

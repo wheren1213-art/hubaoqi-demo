@@ -476,7 +476,7 @@
         const x = Math.round(u.x + dx * t), y = Math.round(u.y + dy * t);
         if (!S.inside(x, y) || t > S.losCap(ox, oy, x, y)) { r = t; break; }
       }
-      pts.push({ x: u.x + dx * r, y: u.y + dy * r });
+      pts.push({ x: (u.cx == null ? u.x : u.cx) + dx * r, y: (u.cy == null ? u.y : u.cy) + dy * r });
     }
     visionCache = { key, pts };
     return pts;
@@ -1264,7 +1264,11 @@
       ctx.setLineDash([4,4]);ctx.stroke();ctx.setLineDash([]);ctx.lineWidth=1;
     }
     // 路径线只在"真知道它往哪走"时画；薄雾区的旧情报不画路线，免得把 2 秒前的计划当成现在
-    if(selected&&selected.path.length&&!S.isStale(selected)){ctx.beginPath();ctx.strokeStyle='#f3e88a';ctx.lineWidth=2;ctx.setLineDash([4,3]);ctx.moveTo((selected.x+.5)*S.TILE,(selected.y+.5)*S.TILE);for(const p of selected.path)ctx.lineTo((p.x+.5)*S.TILE,(p.y+.5)*S.TILE);ctx.stroke();ctx.setLineDash([]);ctx.lineWidth=1;}
+    // 起点用**连续坐标**（104）：判定格每半格翻一次，拿它当起点会让虚线头一跳一跳（14px）。
+    if(selected&&selected.path.length&&!S.isStale(selected)){
+      const q=S.renderPos(selected);
+      ctx.beginPath();ctx.strokeStyle='#f3e88a';ctx.lineWidth=2;ctx.setLineDash([4,3]);ctx.moveTo((q.x+.5)*S.TILE,(q.y+.5)*S.TILE);for(const p of selected.path)ctx.lineTo((p.x+.5)*S.TILE,(p.y+.5)*S.TILE);ctx.stroke();ctx.setLineDash([]);ctx.lineWidth=1;
+    }
     for(const u of S.allUnits){if(u.hp<=0)continue;
       if(u.team!=='blue'){
         const st=fogState.get(u.id);

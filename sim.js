@@ -761,7 +761,7 @@
   function foesWithin(u, r) {
     const pool = u.team === 'blue' ? enemies : units;
     let n = 0;
-    for (const o of pool) if (o.hp > 0 && Math.hypot(o.x - u.x, o.y - u.y) <= r) n++;
+    for (const o of pool) if (o.hp > 0 && distance(o, u) <= r) n++;
     return n;
   }
 
@@ -1060,10 +1060,11 @@
   function 开局士气(/* 位置、阵营、编制……以后按需注入 */){ return MORALE.START; }
 
   function base(x,y,extra){
-    // 103：`cx/cy` 是**连续的实时坐标**（唯一位置账本），`x/y` 是"已经到达的那一格"（判定用）。
-    //   为什么不是直接把 x/y 改成浮点：占位 `cellFree`、地形 `tileCost`、射程 `distance` 全是
-    //   按整格写的，动了就是全盘数值重算。分两本账、只让积分器写 cx/cy，是"其他 RTS 的做法"
-    //   在格子规则里的最小落地——它们只有一个连续坐标，是因为它们的规则本身也是连续的。
+    // 103/104：`cx/cy` 是**连续的实时坐标**（唯一位置账本），`x/y` 是"当前所在的格"（判定用）。
+    //   x/y 不是另一本账，是 cx/cy 的**派生量**：每步由 `syncCell` 取最近格，差恒 ≤0.5 格。
+    //   为什么不是直接把 x/y 改成浮点：占位 `cellFree`、地形 `tileCost`、A* 全是按整格写的，
+    //   动了就是全盘数值重算。为什么不做 getter：全库读 x/y 上百处，隐式拦截会让"谁写了坐标"
+    //   查不出来；同步点收敛到积分器一处，显式更好查。
     // `progress` 103 起是**历史字段**：不参与成像、不参与移动，全是 0。留着只为不惊动外部探针。
     return Object.assign({x,y,cx:x,cy:y,path:[],progress:0,attackTimer:0,turnTimer:0,targetId:null,
       isRouted:false,state:'待命',order:null,hold:null,lastHitBy:null,thinkTimer:0,
@@ -1354,7 +1355,22 @@
     return searchPath(unit,sx,sy,(x,y)=>x===tx&&y===ty,zone);
   }
   function targetById(id){return allUnits.find(u=>u.id===id&&u.hp>0)||null;}
-  function distance(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
+  // 98/104：距离是**连续量**——有 `cx/cy` 的对象按连续坐标算，纯格点 `{x,y}` 按格心算。
+  //   104 之前一律用整格 `x/y`：那等于"两支相隔几格"用**最后到达的格心**去量，兵在格内走了
+  //   0.9 格也还按上一格算，于是射程、接敌、士气光环、警戒半径全都和画面差半格到一格。
+  //   现在的分界只有一条：**离散的事（占位/地形/寻路）读 x/y，连续的事（距离/射程/感知）读 cx/cy。**
+  //   这正是 103 注释里说的"让规则也读连续坐标"——只做距离这一项，不动格子规则。
+  // 外部只写了 x/y 的（测试的 park、剧本增援、探针）在这里顺手接过来：正常派生差恒 ≤0.5 格，
+  //   越过 GAP_EPS 就说明有人直接改了 x/y，不是移动积分器写的。
+  const GAP_EPS = 0.55;
+  // 射程判定必须带容差：两支都站在格心时距离恰好是整数，浮点是 1.0000000000000002——
+  //   不加容差就会在"在射程内/外"之间抖动，守军为这一丁点差额走出去半步再卡住
+  //   （amove_test [2] 实测：状态在 交战/迎敌/接敌停步 三处来回跳）。
+  //   1e-6 格 ≈ 3e-5 屏幕像素，规则与肉眼都到不了这个量级。
+  const RANGE_EPS = 1e-6;
+  function contX(o){ if(o.cx!=null&&Math.abs(o.cx-o.x)>GAP_EPS){o.cx=o.x;o.cy=o.y;} return o.cx==null?o.x:o.cx; }
+  function contY(o){ if(o.cy!=null&&Math.abs(o.cy-o.y)>GAP_EPS){o.cy=o.y;o.cx=o.x;} return o.cy==null?o.y:o.cy; }
+  function distance(a,b){return Math.hypot(contX(a)-contX(b),contY(a)-contY(b));}
   // 98：队形/视野问的是"这支部队脚下是什么**地表**"，不是"base 是什么"。
   //   内部一律走 helper（tileBase / isForest），对外保持 'forest' 这个语义不变，
   //   这样 terrainSight / sightFor / ui 的林中修正都不必改口径，也不会悄悄失效。
@@ -1701,7 +1717,7 @@
   //   98 真机抓到的一条（只查"下令那一刻"的尺子会漏）：**`targetId` 是下 ATTACK 令时就挂上的**
   //   （orderAttack 直接赋值、那时人还在几十格外），它不是"接战"。拿 `!!u.targetId` 当判据，
   //   第二段 RUSH_ON 刚打开就在下一个逻辑步被自己清掉：回执写着「全力冲锋」，画面一帧都没切。
-  //   接战只认"真的进到射程里"——与 4) 交火结算同一个 `distance(u,t)<=u.range`，
+  //   接战只认"真的进到射程里"——与 4) 交火结算同一个 `distance(u,t)<=u.range+RANGE_EPS`，
   //   不许再拿"目标是否已被指派"来代判。
   function updateRush(u){
     if(!u||!u.rush)return;
@@ -1711,7 +1727,7 @@
       gone=!t||t.hp<=0||!!t.isRouted;
     }
     const t=u.targetId?targetById(u.targetId):null;
-    const engaged=!!t&&t.hp>0&&distance(u,t)<=u.range;
+    const engaged=!!t&&t.hp>0&&distance(u,t)<=u.range+RANGE_EPS;
     if(engaged||gone||u.hp<=0||u.isRouted)setRush([u],false,true);
   }
   // ── 加速行军（101）────────────────────────────────────────────────
@@ -1792,20 +1808,36 @@
   //   动 progress，位置就动。LOL/Dota/星际/帝国时代都不存在这个动作：位置是持有量，
   //   指令层无权写坐标，所以结构上不可能弹。
   // 现在照这条改：`cx/cy` 只由积分器（step 的移动段）推进，其余任何地方都不碰；
-  //   `x/y` 在到达那一刻由积分器赋值，规则照旧按整格读。
-  // 外部（测试/剧本/增援）直接写 x/y 时靠 ensureCont 把 cx/cy 跟过去——正常移动时
-  //   |cx-x| 最多 √2≈1.41（斜走一整格），所以 1.6 这个门槛不会被移动误判成"瞬移"。
+  //   `x/y` 是**派生量**——每一步由 `syncCell` 同步成"最近的那一格"（104）。
+  // 103 时 x/y 是"最后到达过的格心"：兵在格内走了 0.9 格，判定格还停在上一个格心。
+  //   实测（`_probe104_cell`）落后 **1.000 格**、方向**恒为身后**，于是射程/接触/占位/迷雾
+  //   全按那格算——"贴着敌人半格还判没进射程""站在林子里一半却不算隐蔽"。
+  // 104 起 x/y = round(cx)，两者差恒 ≤0.5 格、方向对称。剩下的半格是格子规则的分辨率下限，
+  //   要彻底消掉得让规则本身连续（距离、占位全按浮点），那是另一个量级、会改射程平衡。
   function ensureCont(u){
-    if(u.cx==null||Math.abs(u.cx-u.x)>1.6||Math.abs(u.cy-u.y)>1.6){
+    // 正常移动下 `|cx-x| ≤ 0.5`（x 就是最近的格），所以 GAP_EPS=0.55 只在**外部写坐标**时触发：
+    //   测试的 `park(u,x,y)`、剧本增援、探针直接改 u.x。差 ≥1 格才会被当成瞬移。
+    //   **不许把这个门槛压到 0.5 以下**：正常派生的差可以正好是 0.5，误判一次就是把兵
+    //   拽回半格——那正是 103 要消灭的回弹。
+    if(u.cx==null||Math.abs(u.cx-u.x)>GAP_EPS||Math.abs(u.cy-u.y)>GAP_EPS){
       u.cx=u.x;u.cy=u.y;u._rx0=u.cx;u._ry0=u.cy;
     }
   }
-  // 寻路起点＝**已经到达的那一格**（u.x/u.y），不是 round(cx)。
-  //   第一版试过 round(cx)，结果是探针当场抓到 1.65 格的"瞬时位移"：从 12 起搜的第一跳是 13，
-  //   而判定格还停在 11，于是 `|cx-x|` 越过了 1.6 的瞬移门槛、ensureCont 把兵拽回 11——
-  //   正好是这轮要消灭的回弹。从 u.x 起搜，第一跳必然与它相邻，`|cx-x|` 永远 ≤√2，
-  //   连续坐标一路单调向前，不存在"被拽回"的可能。
-  //   代价只有一个：贴到半格时改令，路径可能比最优多半格——肉眼不可见，且换不来任何跳变。
+  // 判定格同步：**唯一**把 cx/cy 折回 x/y 的地方。只许移动积分器在写完 cx/cy 之后调用。
+  //   散到别处写 x/y 就等于又开了一本账（103 的教训：位置一旦有两个来源，就会有人写错那一个）。
+  function syncCell(u){u.x=Math.round(u.cx);u.y=Math.round(u.cy);}
+  // 外部搬兵的唯一入口（测试摆位、剧本增援、探针）。**只写 u.x/u.y 不算搬兵**：
+  //   104 起 x/y 是派生量，只改它等于只改判定格——成像还留在原地、distance 也还按 cx 算，
+  //   "贴到脸上其实没贴到"。渲染快照一并搬走，否则下一帧会从旧位置插值滑过来。
+  function teleport(u,x,y){
+    u.cx=x;u.cy=y;u.x=Math.round(x);u.y=Math.round(y);
+    u._rx0=u.cx;u._ry0=u.cy;
+    return u;
+  }
+  // 寻路起点＝判定格（u.x/u.y）＝离兵最近的那一格，与成像位置一致。
+  //   103 时它等于"已经到达的格心"，比连续坐标落后；第一版直接改成 round(cx) 又踩了另一个坑：
+  //   那时 x/y 还停在上一格，`|cx-x|` 越过 1.6 的瞬移门槛、ensureCont 把兵拽回。
+  //   104 起 x/y 本身就是 round(cx)，起点与成像天然一致，不存在"被拽回"的那条路。
   function sxOf(u){ensureCont(u);return Math.round(u.x);}
   function syOf(u){ensureCont(u);return Math.round(u.y);}
   function orderMove(unit,x,y){
@@ -1912,7 +1944,7 @@
       if(threat&&distance(u,threat)<=u.range+1){u.targetId=threat.id;u.state='交战';return;}
       if(threat&&distance(u,threat)>u.range+1){u.targetId=threat.id;u.path=findAttackPath(u,threat)||[];u.state=u.path.length?'接近目标':'交战';return;}
     } else if(!u.path.length){
-      const foe=enemies.find(x=>x.hp>0&&distance(u,x)<=u.range);
+      const foe=enemies.find(x=>x.hp>0&&distance(u,x)<=u.range+RANGE_EPS);
       if(foe){u.targetId=foe.id;u.state='交战';return;}
     }
     u.targetId=null;
@@ -1993,7 +2025,7 @@
     // 接敌＝暂停（不清目标）：敌人进入 4 格但还不在射程（够不着也走不动）→ 暂停；
     // 射程内 → 交战（unitThink 管）；敌人退出 4 格/被消灭 → 自动恢复推进
     const nearFoe=allUnits.filter(o=>o.hp>0&&o.team!==u.team&&distance(u,o)<=AWARE.CLOSE);
-    const outOfReach=nearFoe.length&&nearFoe.every(o=>distance(u,o)>u.range);
+    const outOfReach=nearFoe.length&&nearFoe.every(o=>distance(u,o)>u.range+RANGE_EPS);
     if(u.goal.attack){u.goal.paused=false;u.state='推进';}   // A 过去：接敌不暂停，交火循环+unitThink 处理边走边打
     else if(outOfReach){
       if(!u.goal.paused){u.goal.paused=true;u.state='接敌暂停';if(u.team==='blue')toast(`${u.name}与敌对峙，暂停推进。`);}
@@ -2123,7 +2155,7 @@
     for(const e of foesOf(u)){
       if(e.hp<=0||e.isRouted)continue;
       if(pred&&!pred(e))continue;
-      const d=Math.hypot(u.x-e.x,u.y-e.y);
+      const d=distance(u,e);
       if(d<bestD){bestD=d;best=e;}
     }
     return best;
@@ -2132,12 +2164,12 @@
   //   为什么逐格挪而不寻路：一个守军不该为了赶一个过路的敌人绕半张图；逐格挪还天然
   //   贴着防区边界走（越界的候选格在选的时候就被去掉了），"守得住那块地"才是本意。
   function holdStep(u,foe,h){
-    let best=null,bestD=Math.hypot(u.x-foe.x,u.y-foe.y);
+    let best=null,bestD=distance(u,foe);
     for(const [dx,dy] of RING8){
       const x=Math.round(u.x)+dx,y=Math.round(u.y)+dy;
       if(!canStand(u,x,y))continue;
       if(Math.hypot(x-h.x,y-h.y)>h.r+.01)continue;            // 不出防区
-      const d=Math.hypot(x-foe.x,y-foe.y);
+      const d=distance({x,y},foe);
       if(d<bestD-1e-6){bestD=d;best={x,y};}
     }
     return best;
@@ -2385,7 +2417,7 @@
     if(simTime - lastHit < ABSORB.quiet || u.targetId)
       return {ok:false, why:'正在接战，整队要等脱离接触'};
     if(foesWithin(u, ABSORB.safe) > 0) return {ok:false, why:`${ABSORB.safe} 格内还有敌军`};
-    const dist = o => Math.hypot(o.x - u.x, o.y - u.y);
+    const dist = o => distance(o, u);
     const mates = allUnits
       .filter(o => o !== u && o.team === u.team && o.hp > 0 && !o.isRouted && dist(o) <= ABSORB.radius)
       .sort((a, b) => dist(a) - dist(b));
@@ -2622,7 +2654,7 @@
     const target=pool.slice().sort((a,b)=>distance(e,a)-distance(e,b))[0];
     e.targetId=target.id;
     e.stance='GUARDED';            // 已经咬上了，当然处于戒备
-    if(distance(e,target)<=e.range){e.path=[];e.state='交战';return;}
+    if(distance(e,target)<=e.range+RANGE_EPS){e.path=[];e.state='交战';return;}
     // 弓兵被近战贴脸则后撤拉开距离
     if(e.type==='弓兵'){
       const melee=visible.filter(u=>u.type!=='弓兵').sort((a,b)=>distance(e,a)-distance(e,b))[0];
@@ -2766,7 +2798,7 @@
   function engage(e,target){
     e.targetId=target.id;
     e.stance='GUARDED';            // 已经咬上了，当然处于戒备
-    if(distance(e,target)<=e.range){e.path=[];e.state='交战';return;}
+    if(distance(e,target)<=e.range+RANGE_EPS){e.path=[];e.state='交战';return;}
     if(!e.path.length){const p=findAttackPath(e,target);e.path=p||[];}
     e.state=e.path.length?'接近':'交战';
   }
@@ -2858,14 +2890,14 @@
     //   撤退不去（那是拼命跑，还手就死在原地）、跟随不去（followStep 自己会索敌，别抢它的活）。
     // 站住不改 path：敌人死了/跑了，path 还在，接着走——这就是 A-move 与"停下不走了"的区别。
     if(u.path.length&&ENGAGE_STOP.includes(u.order)){
-      const t=nearestFoe(u,e=>Math.hypot(u.x-e.x,u.y-e.y)<=u.range);
+      const t=nearestFoe(u,e=>distance(u,e)<=u.range+RANGE_EPS);
       if(t){u.targetId=t.id;u.state='接敌停步';return;}
       u.targetId=null;
     }
     if(u.order==='RALLY'){
       // 集结中的部队同样会就地还击，不会站着挨打
       if(u.path.length){u.state='集结';return;}
-      const t=enemies.filter(e=>e.hp>0&&distance(u,e)<=u.range).sort((a,b)=>distance(u,a)-distance(u,b))[0];
+      const t=enemies.filter(e=>e.hp>0&&distance(u,e)<=u.range+RANGE_EPS).sort((a,b)=>distance(u,a)-distance(u,b))[0];
       if(t){u.targetId=t.id;u.state='交战';}
       else {u.targetId=null;u.state='集结待命';}
       return;
@@ -2886,12 +2918,12 @@
         return;
       }
       const h=holdOf(u);
-      const t=nearestFoe(u,e=>Math.hypot(u.x-e.x,u.y-e.y)<=u.range);
+      const t=nearestFoe(u,e=>distance(u,e)<=u.range+RANGE_EPS);
       if(t){u.targetId=t.id;u.state='交战';u.holdTick=0;return;}
       u.targetId=null;
       u.holdTick=Math.max(0,(u.holdTick||0)-dt);
       if(u.holdTick>0)return;                       // 节流：寻路不是每帧都跑得起
-      const zone=nearestFoe(u,e=>Math.hypot(e.x-h.x,e.y-h.y)<=h.r);
+      const zone=nearestFoe(u,e=>distance(e,{x:h.x,y:h.y})<=h.r);
       if(zone){
         const step=holdStep(u,zone,h);
         if(step){u.path=[step];u.holdWalk='CHASE';u.holdTick=HOLD.TICK;u.state='迎敌';return;}
@@ -2906,7 +2938,7 @@
       // 推进中"射程内有敌就站住打"上面已经拦掉了（行军接敌）；这里管的是没接敌的推进，
       //   以及停下时（推进结束/被地形卡住）就地还击——目标脱离射程就停火，交还给 goalStep。
       if(u.path.length){u.state='推进';return;}
-      const t=enemies.filter(e=>e.hp>0&&distance(u,e)<=u.range).sort((a,b)=>distance(u,a)-distance(u,b))[0];
+      const t=enemies.filter(e=>e.hp>0&&distance(u,e)<=u.range+RANGE_EPS).sort((a,b)=>distance(u,a)-distance(u,b))[0];
       if(t){u.targetId=t.id;u.state='交战';}
       else {u.targetId=null;u.state='待命';}
       return;
@@ -2915,7 +2947,7 @@
       if(!u.path.length&&u.hold){u.order='DEFEND';u.state='驻守';u.targetId=null;return;}   // 带目的地的撤退：到点转驻守
       if(!u.path.length){u.order=null;u.state='待命';u.targetId=null;return;}
       const attacker=u.lastHitBy?targetById(u.lastHitBy):null;
-      if(attacker&&distance(u,attacker)<=u.range)u.targetId=attacker.id;else u.targetId=null;
+      if(attacker&&distance(u,attacker)<=u.range+RANGE_EPS)u.targetId=attacker.id;else u.targetId=null;
       return;
     }
     if(u.order==='MOVE'){
@@ -2933,7 +2965,7 @@
     if(u.order==='ATTACK'&&u.targetId){
       const t=targetById(u.targetId);
       if(!t){u.targetId=null;u.order='MOVE';u.state='待命';u.path=[];return;}
-      if(distance(u,t)<=u.range){u.path=[];u.state='交战';return;}
+      if(distance(u,t)<=u.range+RANGE_EPS){u.path=[];u.state='交战';return;}
       if(!u.path.length){
         const p=findAttackPath(u,t);
         if(p&&p.length){u.path=p;u.state='接近目标';}
@@ -3265,18 +3297,22 @@
         // 判据用"射程内"而不是"有 targetId"：目标走出射程后这一帧就该重新迈步，
         //   不等下一帧 unitThink 来清（清 targetId 在交火结算里，晚半帧就会多站一会儿）。
         const stopFoe=u.targetId?targetById(u.targetId):null;
-        if(ENGAGE_STOP.includes(u.order)&&stopFoe&&stopFoe.hp>0&&distance(u,stopFoe)<=u.range){u.state='接敌停步';continue;}
+        if(ENGAGE_STOP.includes(u.order)&&stopFoe&&stopFoe.hp>0&&distance(u,stopFoe)<=u.range+RANGE_EPS){u.state='接敌停步';continue;}
         ensureCont(u);
         let timeLeft=dt;
         while(u.path.length&&timeLeft>0){
           const next=u.path[0];
-          // 103：位置是**连续坐标**，朝下一格的格心直线推进；到了就把"到达格"记到 x/y。
+          // 103：位置是**连续坐标**，朝下一格的格心直线推进。
           //   以前是 `progress` 记"这一格走了多少"，位置由它算出来——所以任何一处把
           //   progress 归零，兵就往回退一格（相机跟着退，玩家看到的是整幅画面弹一下）。
           //   现在只有这里写 cx/cy，别处只能改路径，弹不了。
+          // 104：每写一次 cx/cy 就 `syncCell` 一次——判定格必须与成像同步，且**必须在这里同**，
+          //   不能等到 step 末尾：同一步里后面还有 unitThink/交火读 x/y，晚一步就是"画面在格 A、
+          //   规则在格 B"；更要命的是中间任何一次 ensureCont（sxOf/visX）都会因为差 >0.5 把
+          //   cx 拽回旧格——那就是回弹原样复活。
           const dx=next.x-u.cx, dy=next.y-u.cy, dist=Math.hypot(dx,dy);
           if(dist<1e-6){                       // 已经站在这一格的格心上（改令/重算路径后常见）
-            u.path.shift();u.x=next.x;u.y=next.y;if(u.goal)u.goal.walked++;changed=true;continue;
+            u.path.shift();syncCell(u);if(u.goal)u.goal.walked++;changed=true;continue;
           }
           const factor=speedAt(next.x,next.y,u);
           // 编组行军按组内最慢者配速，避免骑兵甩开步兵单独送死
@@ -3299,11 +3335,11 @@
           if(!(speed>0)){timeLeft=0;break;}
           const travel=speed*timeLeft;
           if(travel<dist){                      // 走不完这一格：插值，位置连续
-            u.cx+=dx/dist*travel;u.cy+=dy/dist*travel;timeLeft=0;
+            u.cx+=dx/dist*travel;u.cy+=dy/dist*travel;syncCell(u);timeLeft=0;
           } else {                              // 跨格：连续坐标落到格心，判定格同步
             timeLeft-=dist/speed;
             u.cx=next.x;u.cy=next.y;
-            u.path.shift();u.x=next.x;u.y=next.y;
+            u.path.shift();syncCell(u);
             if(u.goal)u.goal.walked++;
             changed=true;
           }
@@ -3362,7 +3398,7 @@
         if(u.reactTimer>0)continue;   // 措手不及：这几秒反应不过来，只能挨打
         const t=targetById(u.targetId);
         if(!t){u.targetId=null;continue;}
-          if(distance(u,t)<=u.range){
+          if(distance(u,t)<=u.range+RANGE_EPS){
             u.attackTimer-=dt;
             if(u.attackTimer<=0){attack(u,t);changed=true;}
           } else if(u.order==='DEFEND'||u.order==='ADVANCE'||u.order==='MOVE'){u.targetId=null;}
@@ -3831,6 +3867,10 @@
     heightAt,eyeHeight,losCap,reported,isStale,visionRadius,fogRadius,
     surpriseSeverity,contactSeverity,reactScale,attackArc,counterMultiplier,inArea,spawnArea,
     findSafePath,moraleWord,pathCost,findAttackPath,localBalance,stanceOn,
+    // 103：连续坐标是唯一位置账本；104 起 `x/y` 是它的派生量。**外部要搬兵只能走 teleport**——
+    //   只写 u.x 等于只改判定格、不改位置，104 的 distance 按 cx 算，于是"贴到脸上"其实没贴到
+    //   （amove_test [2] 就是这么红的：敌人被 park 回格号，视觉上还在 1.14 格处）。
+    teleport,syncCell,
     // 模拟推进与事件
     tick,step,renderPos,STEP,
     // 时间纪律（66）：STEP＝固定逻辑步长；alpha＝当前帧在两步之间的插值位置（0~1）
