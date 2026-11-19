@@ -58,6 +58,9 @@
 
     let ctx = null, node = null, source = null, micStream = null;
     let chunks = [], collecting = false, speechMs = 0, quietMs = 0, held = false, rate = opt.targetRate;
+    // 102：识别代次。每开一次麦克风 +1；识别回来时若代次变了，说明这一句早被后面一次覆盖，
+    //   结果直接丢掉——晚到的旧结果以前会盖掉玩家刚下的新命令（"枪兵队"晚到，把"全军停止"顶掉）。
+    let gen = 0;
 
     const emit = (kind, payload) => {
       for (const fn of listeners[kind].slice()) {
@@ -139,6 +142,7 @@
     }
 
     async function transcribe(samples) {
+      const myGen = gen;                 // 102：这一句属于第几代麦克风
       setState('transcribing');
       const wav = encodeWav(samples, rate);
       const ctl = typeof env.AbortController === 'function' ? new env.AbortController() : null;
@@ -153,11 +157,13 @@
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `识别服务返回 ${res.status}`);
         const text = String(data.text || '').trim();
+        if (myGen !== gen) return;       // 过期结果：这一趟的麦克风已经被新的一趟接替
         lastText = text;
         setState('listening', { ms: data.ms, audio_ms: data.audio_ms });
         if (text) emit('text', { text, raw: text, ms: data.ms, audioMs: data.audio_ms });
         else emit('text', { text: '', empty: true });   // 空识别也通知，便于界面提示"没听清"
       } catch (e) {
+        if (myGen !== gen) return;
         lastError = { message: e && e.name === 'AbortError' ? '识别超时' : String(e && e.message || e) };
         setState('error', lastError);
       } finally {
@@ -197,6 +203,11 @@
       async start() {
         if (!api.isSupported()) { setState('unsupported'); return false; }
         if (state === 'listening' || state === 'recording') return true;
+        // 102：上一句还在识别时不许重开麦克风。以前这里直接往下走，会拿到**第二条**流，
+        //   第一条的 stop() 够不到它（实测泄漏），两趟识别还可能倒序回到命令层。
+        //   松手 → 识别回来这段时间本来就不该再收声音。
+        if (state === 'transcribing') return false;
+        gen++;
         setState('arming');
         try {
           micStream = await env.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
@@ -224,7 +235,7 @@
         }
       },
 
-      stop() { cleanup(); setState('idle'); },
+      stop() { gen++; cleanup(); setState('idle'); },
 
       // 按住说话：按下开始收，松开结束并送识别
       hold(on) {

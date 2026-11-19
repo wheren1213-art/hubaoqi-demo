@@ -238,8 +238,8 @@
   //   一模一样，反推会把本该单步的 36 条展开错（94 训练台实测）。来源归 b 层是唯一不误伤的办法。
   //   第一步 MOVE 保留原 locId（槽位不丢，训练台 slotLost 才量得出来），第二步仍是原动作；
   //   两步都必须是 ACTION_CAPS 里已有的动作 —— 绝不凭空造 `CAPTURE_ON`（d 层没有它）。
-  //   planOfSteps（组合句排队）**不二次展开**：那是"玩家明说的几件事"，与"一条 cmd 隐含的
-  //   执行阶段"是两个粒度，本轮不改执行链路。
+  //   planOfSteps（组合句排队）从 102 起对**含同刻开关**的段也二次展开——不展开就会把
+  //   「再活捉/再冲锋/再加速」整段丢掉；其余段仍是"玩家明说的几件事"，保持一段一阶段。
   function planOf(cmd){
     const ops=cmd&&cmd.ops;
     // ── 97 活捉：一句话的两个阶段（2️⃣ 打他 ＋ 4️⃣ 开活捉）────────────────────
@@ -302,7 +302,26 @@
     return {steps:[stepOf(cmd)]};
   }
   // 多阶段：组合句的每一段是一个阶段，各自一个主谓宾（现在每段都只有一个执行者集合）
-  function planOfSteps(cmds){return {steps:cmds.map(stepOf)};}
+  // 102：**每一段也要展开它自己的 ops**。
+  //   以前这里只 `stepOf(cmd)`，而 `issueCommand` 根本不认 `cmd.ops`——「枪兵队先去北桥再活捉敌弓兵队」
+  //   的第二段只下发了一次普通 ATTACK，`captureMode` 全程 false，回执却写着"打垮那一刻留活口"。
+  //   冲锋（RUSH_ON）、加速行军（FORCED_ON）同一条路径，一起中招。
+  // 只展开"含同刻开关"的那一类：`MOVE→DEFEND` 这种 d 层原生承接的两段照旧一次下发，
+  //   否则一条命令的回执会被拆成两句（96 探针的结论，本轮不改）。
+  //   `now` 标在开关段上：它必须和前一段**同一刻**下发，排队等"到位"就变成"打死了再想抓活的"。
+  function planOfSteps(cmds){
+    const steps=[];
+    for(const cmd of cmds){
+      const sub=planOf(cmd).steps;
+      if(sub.length>1&&sub.some((st,i)=>i>0&&isSwitchStep(st))){
+        for(let i=0;i<sub.length;i++){
+          if(i>0&&isSwitchStep(sub[i]))sub[i].now=true;
+          steps.push(sub[i]);
+        }
+      } else steps.push(stepOf(cmd));
+    }
+    return {steps};
+  }
   // 一个阶段里的 N 个并行主谓宾：调用方给"谁 + 去哪儿"，这里只保证形状
   function planOfParallel(act,parts){
     return {steps:[{assigns:parts.map(p=>({act:act,subj:(p.ids||[]).slice(),obj:p.obj||null}))}]};
@@ -827,7 +846,7 @@
         fillAndRun(missing,missing==='unit'?[id]:id,src,`选择 ${num}. ${cmdPending.options[num-1].label}`);
         return;
       }
-      const got=U.extractAnswer(src,missing,sim.enemies.filter(e=>e.hp>0).map(e=>e.id));
+      const got=U.extractAnswer(src,missing,knownFoes().map(f=>f.id));
       // 追问应答也要记：这是最容易错的一段（它不经过 U.parse，走的是 extractAnswer）。
       if(api.rec)api.rec('b',{text:src,answer:{missing,got:got?(got.reAsk?{reAsk:got.reAsk.hits.map(l=>l.id)}:got.value):null}});
       if(!got){
@@ -1098,6 +1117,14 @@
     q.noticed=false;
     api.sim.setArmed(null,null);
     const out=issueStep(st,`${q.src}（排队第 ${q.idx} 段自动执行）`);
+    // 102：紧跟着的"同刻开关段"（活捉/冲锋/加速）不进排队，发完这一段立刻跟上。
+    //   它等的是"打起来的那一刻"，排队等"到位"就变成打死了再想起来抓活的。
+    while(q.idx<q.plan.steps.length&&q.plan.steps[q.idx].now&&!q.plan.steps[q.idx].when){
+      const sw=q.plan.steps[q.idx];
+      q.idx++;
+      q.since=api.sim.simTime;
+      issueStep(sw,`${q.src}（第 ${q.idx} 段，同刻）`);
+    }
     if(out.status==='CLARIFY'){
       tell(`排队命令缺少信息，已停下：${out.feedback}`);
       dropQueue(null);return;
@@ -1219,8 +1246,10 @@
     //   **只对"一句话隐含的阶段"成立**（ops）：玩家说「活捉敌枪兵队」，俘虏状态必须和
     //   攻击同刻打开。但玩家明说「去桥上然后戒备」时，那个"然后"是他说的时间点——
     //   提前开到路上就把"然后"丢了，所以 explicit 的计划一律按段放行（78 口径不变）。
+    //   102：组合句里含 ops 的那一段（`st.now`）是例外——它同样是"一句话的两个阶段"，
+    //   只是这句话长在组合句里；不在这里放行，活捉/冲锋/加速就会被排到"到位之后"。
     let i=1;
-    while(i<steps.length&&!opt.explicit&&isSwitchStep(steps[i])&&!steps[i].when){
+    while(i<steps.length&&isSwitchStep(steps[i])&&!steps[i].when&&(!opt.explicit||steps[i].now)){
       issueStep(steps[i],`${src}（第 ${i+1} 段）`);
       i++;
     }
@@ -1232,7 +1261,7 @@
       staged=steps.length-i;
       const cmds=steps.map(s=>s.cmd).filter(Boolean);
       tell(`排队：${cmds.length>1?chainInterp(cmds):planText(plan)}`
-        +`（共 ${steps.length} 段，${i>1?'前一段已下达，':''}到位后自动接着做）`);
+        +`（共 ${steps.filter(s=>!s.now).length} 段，${i>1?'前一段已下达，':''}到位后自动接着做）`);
     }
     return Object.assign({},out,{staged:staged,queued:staged});
   }
@@ -1258,8 +1287,35 @@
       :'还没见到敌军。');
     return rows.length;
   }
+  // ── 102：「我知道哪些敌人」只有这一个来源 ──────────────────────────────
+  // 凡是**要对玩家说出来**的敌军（点名、报距离、列候选、接受补充）一律走这里，
+  //   绝不遍历 `sim.enemies`：那是整张战斗序列，念出来就是开图。
+  //   条目形态与 deliverFoeReport 一致：live 看得见 / lagged 友军报告（位置滞后）/ ghost 残影。
+  function knownFoes(){
+    const out=[];
+    for(const [id,s] of api.sim.enemyFogState()){
+      const e=api.sim.enemies.find(x=>x.id===id);
+      out.push({id,name:(e&&e.name)||'敌军',mode:s.mode,x:s.x,y:s.y,age:s.age||0});
+    }
+    return out;
+  }
+  function nearestKnown(point,list){
+    if(!point)return null;
+    let best=null;
+    for(const f of list){
+      const d=Math.hypot(point.x-f.x,point.y-f.y);
+      if(!best||d<best.dist)best={foe:f,dist:d};
+    }
+    return best;
+  }
+
+  // 102：提交代次。语义兜底是**异步**的（本地句向量模型就绪时），一句"枪兵队"挂起后
+  //   玩家改下"全军停止"，旧结果晚到会把停止顶掉、又发一条机动令（审查实测 88 格）。
+  //   每次进 dispatchOrClarify +1，回来时对不上就作废——晚到的旧理解不许覆盖新命令。
+  let submitSeq=0;
 
   function dispatchOrClarify(src,followUp){
+    const seq=++submitSeq;
     const sim=api.sim;
     const corr=U.cmdCorrected(src);
     // 战术词判定排在最前，且必须按**整句**判（70）：
@@ -1328,9 +1384,10 @@
         ||(parsed.missing==='location'&&!parsed.cmd.locId&&!(parsed.options&&parsed.options.length)));
     if(needsFallback&&U.semanticReady()){
       U.semanticMatch(src).then(cand=>{
+        if(seq!==submitSeq)return;     // 这一句早被后面一句覆盖了：旧理解直接作废
         if(cand){U.applySemantic(parsed,cand);runIssued();}
         else runClarify();
-      }).catch(()=>runClarify());
+      }).catch(()=>{if(seq===submitSeq)runClarify();});
       return;
     }
     if(parsed.clarification_required){runClarify();return;}
@@ -1744,7 +1801,10 @@
         // 以前是回一句"要攻击哪个目标？"，等于让玩家把"眼前的敌人"再说一遍——
         //   而这句话的语义本来就是"别问了，射你能射到的"。
         if(!foe&&cmd.arrow){
-          const hit=sim.enemyInRange(list);
+          // 102：只射**迷雾里认得的**敌人。以前只判距离，弓兵能隔着山脊打一支
+          //   玩家看不见的敌人，回执还把它的名字和距离念出来（审查实测：迷雾 0 条仍报"197.2 格"）。
+          const known=knownFoes();
+          const hit=sim.enemyInRange(list,new Set(known.map(f=>f.id)));
           if(hit){
             const ord=orderOf({who:list,act:'放箭打',tgt:hit.foe.name,
               notes:[`射程内 ${hit.dist.toFixed(1)} 格`].concat(notes())});
@@ -1754,16 +1814,18 @@
             return {status:st,interp:orderText(ord),feedback:lastToast()};
           }
           // 射程内没有：**必须把距离说出来**，否则玩家以为令下去了、只是没射中
-          const alive=sim.enemies.filter(e=>e.hp>0);
-          if(!alive.length){emit(src,'敌军已全歼，没有可射的目标。');return {status:'FAILED',interp:'',feedback:'敌军已全歼'};}
           const range=Math.max(...list.map(u=>u.range||1));
           const at=list[0]||sim.commander;
-          const near=sim.enemyNear(at,9999);
           // 自由文案也得编组：五支部队名并列念出来是这轮要消灭的机器腔之一。
           //   编组规则只有一份（副将的 grp），这里借他的，不另写一套。
           const A=adj();
           const who=A?A.grp(list):names;
-          const msg=`${who}的射程是 ${range} 格，现在射程内没有敌人（最近的敌军在 ${near.dist.toFixed(1)} 格外）。`
+          const near=nearestKnown(at,known);
+          if(!near){
+            emit(src,`${who}的射程是 ${range} 格，现在视野里没有敌军。`);
+            return {status:'FAILED',interp:'',feedback:'视野里没有敌军'};
+          }
+          const msg=`${who}的射程是 ${range} 格，现在射程内没有敌人（我记得最近的一支在 ${near.dist.toFixed(1)} 格外）。`
             +`要他们靠前，或者说「${who}攻击 ${near.foe.name}」让弓兵自己走过去。`;
           emit(src,msg);
           return {status:'FAILED',interp:'',feedback:'射程内没有敌人'};
@@ -1810,7 +1872,8 @@
         if(!foe&&cmd.nearScope){
           const anchor=sim.commander||list[0];
           const near=sim.enemyNear(anchor,sim.DETECT);
-          if(near)foe=near.foe;
+          const seenKnown=near&&knownFoes().some(f=>f.id===near.foe.id);
+          if(seenKnown)foe=near.foe;
           else{
             const one=list[0]?list[0].name:names;
             const msg=`画面里没有敌军（主将视距 ${sim.DETECT} 格内），这一声冲锋没人可冲。远处的敌人要点名，比如「${one}攻击 敌骑兵队」。`;
@@ -1819,11 +1882,17 @@
           }
         }
         if(!foe){
-          const alive=sim.enemies.filter(e=>e.hp>0);
-          if(!alive.length){emit(src, `敌军已全歼，没有攻击目标。`);return {status:'FAILED',interp:'',feedback:'敌军已全歼，没有攻击目标'};}
+          // 102：候选只列**迷雾里认得的**。以前列全 `sim.enemies`——迷雾 0 条也把 8 支敌军的
+          //   名册念一遍，那是整张战斗序列；玩家照着答一句就能锁定看不见的目标（审查实测 193 格）。
+          const known=knownFoes();
+          if(!known.length){
+            const who=adj()?adj().grp(list):names;
+            emit(src,`${who}没有可攻击的目标：现在视野里没有敌军。远处的敌人要先靠近才看得见。`);
+            return {status:'FAILED',interp:'',feedback:'视野里没有敌军'};
+          }
           cmd.__missing='target';
-          const q=`要攻击哪个目标？当前敌军：${U.numbered(alive.map(e=>e.name))}（也可答"弓兵"这类兵种名）。`;
-          cmdClarify(cmd,q,src,alive.map(e=>({id:e.id,label:e.name})));
+          const q=`要攻击哪个目标？视野里的敌军：${U.numbered(known.map(f=>f.name))}（也可答"弓兵"这类兵种名）。`;
+          cmdClarify(cmd,q,src,known.map(f=>({id:f.id,label:f.name})));
           return {status:'CLARIFY',interp:'',feedback:q};
         }
         const ord=orderOf({who:list,act:'攻击',tgt:foe.name,notes:notes()});

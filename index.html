@@ -169,28 +169,28 @@
   <!-- ?v= 是缓存后缀，**每一轮发版必须全体等于 main.js 的 BUILD 号**（不是"哪个文件改了就升哪个"）。
        87–95 九轮漏升，线上 A 一度仍是 main.js?v=86，回访玩家会吃到旧 JS——所以由 docver_test [2] 把守。
        改版本时这条命令一次改完：sed -i 's/\.js?v=[0-9]*/.js?v=<新号>/g' cold_age_demo/index.html -->
-  <script src="worldgen.js?v=101"></script>
-  <script src="sim.js?v=101"></script>
+  <script src="worldgen.js?v=103"></script>
+  <script src="sim.js?v=103"></script>
   <!-- e1 表现层：编制/阵型模板/九兵位次。只读 sim.js 的状态，不回写一个字段；
        必须排在 sim.js 之后（要读 SIM.TILE / SIM.allUnits / SIM.foesWithin）、ui.js 之前。 -->
-  <script src="troop.js?v=101"></script>
+  <script src="troop.js?v=103"></script>
   <!-- 86：BattleContext（d→b 的事实装配）。必须在 sim.js 之后（要读 SIM.read）、
        intent.js 之前（初始化时把它注进 b 层）。这一轮只注入，b 层不消费。 -->
-  <script src="battle_ctx.js?v=101"></script>
-  <script src="understand.js?v=101"></script>
+  <script src="battle_ctx.js?v=103"></script>
+  <script src="understand.js?v=103"></script>
   <!-- c 层子件：副将（对外人格）。必须在 intent.js 之前——命令层的对外出口要用它。
        e′ 语音层（speech.js）排在副将之前：副将只产出话语对象，出声归它，两层互不认识。 -->
-  <script src="recorder.js?v=101"></script>
-  <script src="speech.js?v=101"></script>
-  <script src="adjutant.js?v=101"></script>
-  <script src="intent.js?v=101"></script>
-  <script src="enemy_commander.js?v=101"></script>
-  <script src="ui.js?v=101"></script>
+  <script src="recorder.js?v=103"></script>
+  <script src="speech.js?v=103"></script>
+  <script src="adjutant.js?v=103"></script>
+  <script src="intent.js?v=103"></script>
+  <script src="enemy_commander.js?v=103"></script>
+  <script src="ui.js?v=103"></script>
   <!-- a 层语音：只产出文本，由 main.js 接到 CMD.submit；与 b/c/d 无代码依赖 -->
-  <script src="voice.js?v=101"></script>
-  <script src="main.js?v=101"></script>
+  <script src="voice.js?v=103"></script>
+  <script src="main.js?v=103"></script>
   <!-- 语义兜底层：ES 模块 + 本地模型文件，需要经本地 http 服务打开才会加载；
        file:// 直开或文件缺失时静默缺席，demo 自动退回纯规则解析（node 测试即此路径）。 -->
-  <script type="module" src="semantic.js?v=101"></script>
+  <script type="module" src="semantic.js?v=103"></script>
 </body>
 </html>

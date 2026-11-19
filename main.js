@@ -9,7 +9,7 @@
   // ── 版本指纹：判断「这是哪一版 / 线上跑的是哪一版」只认这一个值 ──────────────
   // 页头右上角显示的就是它，浏览器控制台敲 `BUILD` 也能读到。
   // 改版本时改这里，并在 HANDOFF §5 记一行、同步根目录 CURRENT.md。
-  const BUILD = '2026-11-18 101';
+  const BUILD = '2026-11-19 103';
   try { if (typeof window !== 'undefined') window.BUILD = BUILD; } catch (_) {}
   try {
     const el = document.getElementById('buildTag');
@@ -118,9 +118,16 @@
     }
 
     // 后端地址默认 127.0.0.1:8415；换端口时用 ?voice=http://127.0.0.1:8416 打开即可
+    // 102：**只认回环地址**。以前把参数原样塞进 endpoint，一条构造好的链接就能让
+    //   页面把麦克风录音 POST 到别人的服务器（页面来源校验只管了"从哪打开"，没管"发给谁"）。
     try {
       const ep = new URLSearchParams(location.search).get('voice');
-      if (ep) VOICE.configure({ endpoint: ep });
+      if (ep) {
+        let epHost = '';
+        try { epHost = new URL(ep, location.href).hostname.replace(/^\[|\]$/g, ''); } catch (_) {}
+        if (LOCAL_HOSTS.some(h => h.replace(/^\[|\]$/g, '') === epHost)) VOICE.configure({ endpoint: ep });
+        else UI.echo('已忽略 ?voice= 里的外部地址：识别服务只允许本机回环地址（127.0.0.1 / localhost）。');
+      }
     } catch (_) {}
 
     VOICE.onText(({text,empty}) => {
@@ -163,7 +170,11 @@
     };
     const release = () => {
       pressed = false;
-      if (VOICE.isRecording()) VOICE.hold(false);
+      // 102：**无条件松手**。以前判 `VOICE.isRecording()`，而它在首个音频块到达前是 false
+      //   （4096 样本 ≈ 256ms 一块）——任何短于 256ms 的点按都会把 held=true 留在语音层，
+      //   随后一直录到 15 秒上限，松手以后说的话照样被当成军令执行（审查实测）。
+      //   hold(false) 在没在收的时候只是把 held 放掉，不会误发识别。
+      VOICE.hold(false);
       // 释放麦克风要等**识别返回**之后（见 onText），不是松手就解——上传那 1 秒里
       //   副将若开口，声音仍在录音尾巴里。这里只挂一个兜底：识别始终没回来也得解开，
       //   否则这一局副将永远哑掉。
@@ -198,14 +209,13 @@
     // 真实时间不再直接当模拟步长（66）：它只回答"这一帧该推进几步、插值多少"。
     //   0.25 秒上限＝MAX_CATCHUP 步，切标签页回来最多补 5 步，不会一帧跑上千步卡死。
     const dt=Math.min((now-lastTime)/1000,.25);lastTime=now;
-    const f=SIM.tick(dt);
-    // c / c′ 与 d 层走同一条时间线：这一帧推进了多少，它们就推进多少。
-    //   以前三个 tick 各拿一份帧 dt，各自累计自己的"1 秒一拍"，时间线其实有三条。
-    const dtSim=f.steps*SIM.STEP;
-    if(dtSim>0){
-      CMD.tick(dtSim);        // c 层：组合句排队
-      COMMANDER.tick(dtSim);  // c′ 层：敌军指挥决策
-    }
+    // c / c′ 与 d 层走**同一个逻辑步**（102）：以前它们拿"这一帧共补了几步"的合计，
+    //   一帧里补 2 步时只跑一次，补步越多越慢半拍——10fps 与 20fps 同种子轨迹不同，
+    //   而 `?seed=` 复现是硬约束。现在交给 sim 在每一步之后回调一次，合计一秒仍是 1 秒。
+    const f=SIM.tick(dt,stepSec=>{
+      CMD.tick(stepSec);        // c 层：组合句排队
+      COMMANDER.tick(stepSec);  // c′ 层：敌军指挥决策
+    });
     // e1（编制/队形）走**真实帧 dt**，不走 20Hz 逻辑步：逻辑步决定事实，帧决定画面。
     //   67 之前它在 sim.step() 里按 1/20 推进，而重绘只在下面那几个 dirty 标志为真时才发生——
     //   全场静止时 tick 连续返回全 false，兵位却还在逼近模板，于是队形冻在"过渡到一半"。

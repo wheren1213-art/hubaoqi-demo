@@ -1700,7 +1700,12 @@
     if(cmdInput.focus)cmdInput.focus();
   }
   cmdButton.addEventListener('click',cmdSubmitFromInput);
-  cmdInput.addEventListener('keydown',e=>{if(e.key==='Enter')cmdSubmitFromInput();});
+  // 102：输入法组词时的回车是"选字"，不是"下令"。全文件以前没有 isComposing 判断，
+  //   中文输入法按回车选词就把半句话发出去了（审查实测：命令直接执行、输入框清空）。
+  //   keyCode 229 是部分浏览器/输入法在组词期间给的旧码，两样一起判。
+  cmdInput.addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&!e.isComposing&&e.keyCode!==229)cmdSubmitFromInput();
+  });
   echo('鼠标只直接指挥主将（带将旗那支）：点地图即移动，点别的部队只是看。其它部队用命令调，试「枪兵队和骑兵队去北桥」或「报告」。');
 
   const CMD_LOG_ROW_CLASS={EXECUTED:'ok',PARTIAL:'partial',FAILED:'fail',CLARIFY:'clarify',CANCELLED:'cancel',UNSUPPORTED:'unsupported',OFFTOPIC:'offtopic',QUEUED:'clarify'};
