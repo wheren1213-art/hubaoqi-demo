@@ -296,7 +296,7 @@
       // 薄雾区的部队走 reported()：面板上是信使带回来的旧情报，不是此刻的真值
       const v=S.reported(u);
       const txt=u.hp>0
-        ? `${u.type} · ${u.speed} 格/秒 · ${v.hp}/${v.maxHp} HP · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='GUARDED'?'戒备':'常行'}${v.forced?'·加速':''} · ${S.alertWord(v)} · ${v.state}${v.stale>0?` · 情报 ${v.stale.toFixed(1)}s 前`:''}`
+        ? `${u.type} · ${u.speed} 格/秒 · ${v.hp}/${v.maxHp} HP · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='FORMED'?'列阵':'散阵'}${v.forced?'·加速':''} · ${S.alertWord(v)} · ${v.state}${v.stale>0?` · 情报 ${v.stale.toFixed(1)}s 前`:''}`
         : (u.captured ? '被俘' : '阵亡');
       if(b.dataset.txt!==txt){
         b.dataset.txt=txt;
@@ -320,7 +320,7 @@
         const v=S.reported(u);
         if(v.stale>0){
           t=`${u.name} · 情报约 ${v.stale.toFixed(1)} 秒前\n`
-           +`生命 ${v.hp}/${v.maxHp} · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='GUARDED'?'戒备':'常行'} · 状态：${v.state}\n`
+           +`生命 ${v.hp}/${v.maxHp} · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='FORMED'?'列阵':'散阵'} · 状态：${v.state}\n`
            +`位置 (${Math.round(v.x)}, ${Math.round(v.y)}) · 认知：${S.alertWord(v)}\n`
            +`它在主将视野之外，这是信使刚带回的旧情报；要实时，把主将带过去。`;
         } else {
@@ -346,7 +346,7 @@
         if(boss&&boss.hp>0&&!boss.isRouted&&boss!==u&&S.distance(u,boss)<=S.MORALE.AURA_RADIUS)
           extras.push(`将旗光环 +${S.MORALE.AURA}`);
         // 101：加速行军是档位状态，与戒备并列报（两者可同时开，费用相加）
-        extras.push(`${u.stance==='GUARDED'?'戒备中':'常行'}${u.forced?' · 加速行军':''} 精力 ${Math.round(u.stamina)}`);
+        extras.push(`${u.stance==='FORMED'?'列阵中':'散阵'}${u.forced?' · 加速行军':''} 精力 ${Math.round(u.stamina)}`);
         const grp=selection.length>1?`｜编组 ${selection.length} 支`:'';
         const foeName=u.contact?(S.targetById(u.contact.id)||{}).name:'';
         const ago=u.contact&&u.contact.t!=null?Math.max(0,S.simTime-u.contact.t):null;
@@ -362,7 +362,9 @@
         // ⑸9：阵型名跟着"这支在干什么"变（行军纵阵 / 接敌线阵 / 溃退散阵），
         //   结阵状态另外报，两件事不混：一名是排法，一个是稳不稳。
         // 67：阵型名归 troop.js 算（它才是那份动画状态的持有者），面板只读不给。
-        const formTxt=`${TROOP.formationLabel(TROOP.formKeyOf(u))}（${u.formation==='FORMED'?'已结阵':'破阵'+(u.formationWhy?`：${u.formationWhy}`:'')}）`;
+        // 109：阵型名（这一帧怎么排）与成阵/散阵（戒备开没开）现在是同一件事的两面，
+        //   所以只在"散阵但有缘由"时补一句（溃退），不再写"已结阵/破阵"那套旧词。
+        const formTxt=`${TROOP.formationLabel(TROOP.formKeyOf(u))}（${u.formation==='FORMED'?'成阵':`散阵${u.formationWhy&&u.formationWhy!=='散阵'?`：${u.formationWhy}`:''}`}）`;
         const leadTxt=(u.leader&&u.leader.alive)?` · ${u.leader.kind==='commander'?'主将亲在':'将领随军'}`:'';
         // ㊸：地形对视野的影响要报出"为什么"，不能只给一个数。
         //   数字是结果，原因是玩家能拿来决策的东西（要不要现在上山/钻林/贴河走）。
@@ -427,11 +429,17 @@
     const B = TROOP.BODY, men = TROOP.troopMen(u, ax, ay, d);
     // 不画底衬：试过一层半透明暗底，结果整个簇立刻又变成一个"棋子方块"，
     //   多单位的意义就没了。现在只靠兵自己的深描边把队形和地面分开。
+    // 105：兵从正方形改成**竖条 + 头**。铺开之后每个兵 8px、间距 11.8px，
+    //   纯方块在一堆里读不出"人"（实机截图：像撒了一地的色块）。竖矩形 + 顶部一块亮头，
+    //   第一眼就是"站着的人"；宽度收 22% 也让缝看起来比实际宽一点，不必再缩间距。
+    //   宽度/头高都是 BODY 的比例，不写死像素 —— 改兵身时比例不变。
+    const W = B * .78, H = B;
     for (const m of men) {
       if (m.leader) continue;
-      ctx.fillStyle = '#10171a'; ctx.fillRect(m.x - B / 2 - .45, m.y - B / 2 - .45, B + .9, B + .9);
-      ctx.fillStyle = (u && u.color) || '#8a8f8a'; ctx.fillRect(m.x - B / 2, m.y - B / 2, B, B);
-      ctx.fillStyle = 'rgba(255,255,255,.3)'; ctx.fillRect(m.x - B / 2 + .7, m.y - B / 2 + .7, 1.3, 1.3);
+      ctx.fillStyle = '#10171a'; ctx.fillRect(m.x - W / 2 - .45, m.y - H / 2 - .45, W + .9, H + .9);
+      ctx.fillStyle = (u && u.color) || '#8a8f8a'; ctx.fillRect(m.x - W / 2, m.y - H / 2, W, H);
+      ctx.fillStyle = 'rgba(255,255,255,.34)';
+      ctx.fillRect(m.x - W * .22, m.y - H / 2 + H * .10, W * .44, H * .26);
     }
     // 将只比兵大一圈（+0.6），靠颜色区分而不是靠尺寸：做太大就会压到相邻兵位，
     //   整簇糊成一团，多单位反而看不出来（实机截图后定的尺寸）
@@ -1303,7 +1311,7 @@
       //   所以钉死 18 像素高、贴包围盒顶端，长度只表示精力比例。
       const sh=Math.min(18,bh);
       ctx.fillStyle='#191d19';ctx.fillRect(bb.x1+1.4,bb.y0+.6,1.5,sh);
-      ctx.fillStyle=d.stance==='GUARDED'?'#e3c96a':d.stamina<S.STAMINA.TIRED?'#cf6152':'#7fae7a';
+      ctx.fillStyle=d.stance==='FORMED'?'#e3c96a':d.stamina<S.STAMINA.TIRED?'#cf6152':'#7fae7a';
       const staminaH=sh*(d.stamina/S.STAMINA.MAX);ctx.fillRect(bb.x1+1.4,bb.y0+.6+sh-staminaH,1.5,staminaH);
       ctx.globalAlpha=1;
       // 认知角标：灰点＝未预期，黄点＝有预期（戒备中但没看见人），红杠＝已目视；白框闪烁＝措手不及
@@ -1559,22 +1567,33 @@
 
   // 屏内像素 → 世界像素（点选用；格坐标已经不够用了，见 pickBlueAt）
   function screenToWorld(sx, sy){ return { x: sx / cam.zoom + cam.x, y: sy / cam.zoom + cam.y }; }
-  // 点选（⑸9）：阵型会跨出本格，按"格的坐标相等"判就点不着散到格外的兵。
-  //   规则：落点在某支的编队包围盒里（含 2px 余量）→ 选它；否则取 0.9 格内最近的一支。
-  //   仍然按**你看到的位置**判（薄雾区的兵画的是滞后位置），看到什么点什么。
+  // 点选（⑸9 → 106）：**按兵位判，不按锚点判**。
+  //   106 之前是"包围盒内命中、按锚点距离取最近"。方阵下没问题（兵贴着锚点），
+  //   但线阵横跨 4 格、边兵离锚点 1.9 格；两队锚点相距 3 格时，一队的边兵离**邻队锚点**
+  //   反而更近 —— 点在 A 的兵身上却选中 B（106 探针实测 1.7%）。这与"看到什么点什么"是反的。
+  //   现在量的是"到这个兵的距离"，阈值 PICK_R 格：兵身半径 .14 格 ＋ 半格容差。
+  //   为什么不能再放宽：相邻两队兵位最近处约 0.9 格（锚点 3 格 − 各自 1.05 格），
+  //   阈值越过 0.9 就会把交界处判给错的那支。
+  //   薄雾区的兵画的是滞后位置，所以照旧读 v（reported）——看到什么点什么。
+  const PICK_R = .6;
+  // 点到某支部队**最近一个兵**的距离（世界像素）。兵位是动画坐标，也就是玩家眼里的位置。
+  //   兵全被 walkable 裁掉（整队卡在水里）时返回 Infinity —— 没人可点，不命中。
+  function nearestMan(u, ax, ay, view, wx, wy){
+    let d = Infinity;
+    for (const m of TROOP.troopMen(u, ax, ay, view)) {
+      const dd = Math.hypot(wx - m.x, wy - m.y);
+      if (dd < d) d = dd;
+    }
+    return d;
+  }
   function pickBlueAt(wx, wy){
     let best = null, bestD = Infinity;
     for (const u of S.units) {
       if (u.hp <= 0 || u.team !== 'blue') continue;
       const v = S.reported(u);
       const ax = (v.x + .5) * S.TILE, ay = (v.y + .5) * S.TILE;
-      // 98（Q29）：点选按 **footprint 包围盒**，不是按兵位动画包围盒。
-      //   两者差别在"减员/半血"时最要命：troopBounds 只框住还在画的那几个兵，
-      //   而这一队实际占的地仍是整块 footprint —— 玩家点它散出去的那半边会点空。
-      const bb = TROOP.footprintBounds ? TROOP.footprintBounds(u, ax, ay, v) : TROOP.troopBounds(u, ax, ay, v);
-      const inBox = wx >= bb.x0 - 2 && wx <= bb.x1 + 2 && wy >= bb.y0 - 2 && wy <= bb.y1 + 2;
-      const d = Math.hypot(wx - ax, wy - ay);
-      if ((inBox || d <= S.TILE * .9) && d < bestD) { best = u; bestD = d; }
+      const d = nearestMan(u, ax, ay, v, wx, wy);
+      if (d <= S.TILE * PICK_R && d < bestD) { best = u; bestD = d; }
     }
     return best;
   }
@@ -1585,12 +1604,11 @@
       const e = S.enemies.find(x => x.id === id && x.hp > 0);
       if (!e) continue;
       const ax = (st.x + .5) * S.TILE, ay = (st.y + .5) * S.TILE;
-      // 98（Q29）：同上，敌队点选也按 footprint（薄雾里画的是滞后位置，包围盒跟着滞后锚点走）。
-      const bb = TROOP.footprintBounds ? TROOP.footprintBounds(e, ax, ay, { hp: st.hp, maxHp: st.maxHp, leader: null })
-        : TROOP.troopBounds(e, ax, ay, { hp: st.hp, maxHp: st.maxHp, leader: null });
-      const inBox = wx >= bb.x0 - 2 && wx <= bb.x1 + 2 && wy >= bb.y0 - 2 && wy <= bb.y1 + 2;
-      const d = Math.hypot(wx - ax, wy - ay);
-      if ((inBox || d <= S.TILE * .9) && d < bestD) { best = e; bestD = d; }
+      // 106：与蓝方同一把尺子（兵位距离）。薄雾里画的是滞后位置，所以 view 用情报的 hp，
+      //   兵位跟着滞后锚点走——看得见的那一簇才点得中。
+      const view = { hp: st.hp, maxHp: st.maxHp, leader: null };
+      const d = nearestMan(e, ax, ay, view, wx, wy);
+      if (d <= S.TILE * PICK_R && d < bestD) { best = e; bestD = d; }
     }
     return best;
   }
@@ -1657,19 +1675,26 @@
     S.stopUnits(live);
     flush();refresh();
   });
-  // 戒备是一条命令，不是自动状态：由你决定哪一段路值得绷紧，代价是速度与精力。
+  // 109：这个按钮是**唯一的阵型命令**——"列阵"和"戒备"是同一件事。
+  //   开＝保持战斗队形（走起来自动转行军、停下自动转战斗队形），关＝散阵。
+  //   系统还有一条自动入口：已目视敌军时会自己开；脱敌时自己关（`sim.js` updateStanceAuto）。
+  //   **已目视期间按钮置灰**：不是禁用能力，是那条命令此刻不会生效（下一步会被开回去），
+  //   让它可点就是个"点了没反应"的假按钮。
   const stanceButton=document.getElementById('stanceButton');
   function refreshStance(){
     const live=liveSelection();
-    const on=live.length>0&&live.every(u=>u.stance==='GUARDED');
+    const on=live.length>0&&live.every(u=>u.stance==='FORMED');
+    const locked=live.length>0&&on&&live.every(u=>u.alert==='ALERT');
     const label=on?'转为常行':'转入戒备';
     if(stanceButton.textContent!==label)stanceButton.textContent=label;
     stanceButton.classList.toggle('selected',on);
+    stanceButton.disabled=locked;
+    stanceButton.title=locked?'已目视敌军，散不得阵——要收队先脱离接触':'';
   }
   stanceButton.addEventListener('click',()=>{
     const live=liveSelection();
     if(!live.length){show('请先选择可用的部队。');return;}
-    if(live.every(u=>u.stance==='GUARDED'))S.stanceUnitsOff(live);
+    if(live.every(u=>u.stance==='FORMED'))S.stanceUnitsOff(live);
     else S.stanceUnitsOn(live);
     flush();refresh();
   });

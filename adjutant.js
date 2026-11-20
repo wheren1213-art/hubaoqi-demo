@@ -319,7 +319,7 @@
       if (r.stamina < 25) s += '，精力见底';
       else if (r.stamina < 50) s += '，精力有些乏';
     }
-    if (r.stance === 'GUARDED') s += '，还撑着戒备';
+    if (r.stance === 'FORMED') s += '，还列着阵';
     // 认知只说"吃亏的那一头"：已目视不必夸一遍，没准备才要提醒
     if (r.alert === '未预期') s += '，还没察觉敌人';
     else if (r.alert === '措手不及') s += '，被打了个措手不及';

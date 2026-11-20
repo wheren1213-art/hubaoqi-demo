@@ -2024,7 +2024,7 @@
             stale:v.stale||0};
         });
         const lines=pool.map(u=>u.hp>0
-          ?`${u.name}：生命 ${u.hp}/${u.maxHp} · 士气 ${Math.round(u.morale)}（${sim.moraleWord(u.morale)}） · 精力 ${Math.round(u.stamina)} · ${u.stance==='GUARDED'?'戒备':'常行'} · ${sim.alertWord(u)} · ${u.state}`
+          ?`${u.name}：生命 ${u.hp}/${u.maxHp} · 士气 ${Math.round(u.morale)}（${sim.moraleWord(u.morale)}） · 精力 ${Math.round(u.stamina)} · ${u.stance==='FORMED'?'列阵':'散阵'} · ${sim.alertWord(u)} · ${u.state}`
           :`${u.name}：阵亡`);
         // 副将在就由他汇报（带精力/戒备/认知，翻成人话）；不在则回落到字段式输出
         const a=adj();

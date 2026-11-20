@@ -705,6 +705,31 @@
   // 地形不再影响士气（2026-11-13 拍板）。原来站高地 +8、钻林子 -4，与地形影响速度/防御
   //   是同一件事的两处表达；士气只从「人」来（周边兵力、将旗、认知），不从「地」来。
 
+  // ── 转身（107，挂账 22）─────────────────────────────────────────
+  // 103 位置连续化之后，"手感硬"只剩一处：**改令当帧速度方向瞬变**（向东走着，一声令下
+  //   直接向西平移）。104 把判定格对齐之后这条路更明显——兵是真的在连续移动，
+  //   所以"瞬间反向"看得一清二楚。
+  //
+  // 做法：单位有一个连续的行进朝向 `u.turn`（弧度）。每步朝"该走的方向"转，
+  //   角速度有上限；速度按 `cos(朝向与目标方向的夹角)` 打折。
+  //   背对目标时 cos≤0 ⇒ 速度 0 ⇒ **原地转**，转过 90° 才起步、转到 0° 才全速。
+  //   于是"先转身再走"不需要一个专门的"转身中"状态，它就是这套公式的自然结果
+  //   （多一个状态就多一处要同步的地方，103 的教训）。
+  //
+  // 为什么不改位移方向（走弧线）：
+  //   ① 走弧线会跨到路径以外的格，可能进水、进墙——那是 d 层的雷区，寻路/占位全按格写；
+  //   ② 位移方向仍朝 `path[0]` ⇒ **寻路、占位、落点一个字都不用改**。
+  //   代价是转身期间"倒着蹭"的那点位移被抹掉，换来零风险。
+  //
+  // 代价（写进 GAME_RULES §4.6）：反向令比原来慢约 0.45 秒的路程
+  //   （180° 要 0.6 秒，前 0.3 秒速度 0、后 0.3 秒 0→1 爬升）。这正是挂账里说的
+  //   "先转身再走＝每次都慢半拍"。**这是要的代价，不是要修的 bug**。
+  //
+  // 300°/秒（转 180° 用 0.6 秒）的依据：20fps 下一帧转 15°，再快（比如 600°/秒＝30°/帧）
+  //   在离散帧里就是"跳两下转完"，读不出转身。慢于 0.9 秒则每次改令都像卡了一下。
+  //   与战斗朝向 `turnToward`（0.28 秒 / 45° ≈ 160°/秒）是两套：那个是**枪口**，这个是**身子**。
+  const TURN = { RATE: Math.PI / 0.6 };        // 弧度/秒
+
   // ── 驻守的防区（73）───────────────────────────────────────────────
   // 驻守以前＝"守一个格子 ＋ 只在射程内还击"。两件事因此做不到，都是真的：
   //   ① 步战射程 1 格，敌弓兵站 5 格外射它，它既不还手也不挪窝——守桥变成挨射；
@@ -715,9 +740,13 @@
   //   敌出防区 / 打完了 → 回守位
   // 为什么是 3 格：射程 1 的部队一步不出，任何一支弓兵都能白吃它；而防区越大越像
   //   "追出去打"，就越守不住那块地。3 格是"够得着赶人"与"来得及回位"之间的折中。
+  // ⚠️ 105：3 → 4。105 把射程改成"边缘距"（每侧补 REACH=1 格），接敌距离从 1 变成 3，
+  //   防区仍是 3 就**一点余量都没有了**——"射程外、防区内"这一段被压成零，
+  //   `迎敌` 这个行为会被几何直接吃掉（hold_test 三条当场红：再也不出现"迎敌"、
+  //   守军一步不挪）。4 格 = 接敌距离 3 + 1 格缓冲，仍保留"追一步就回来"的原意。
   //   TICK 是重算节奏：迎敌逐格挪（3×3 邻域，不寻路），回位才走一次 A*；
   //   两个都不该每帧跑——一次驻守不该吃掉整帧的寻路预算。
-  const HOLD = { R:3, TICK:.5, EPS:.01 };
+  const HOLD = { R:4, TICK:.5, EPS:.01 };
   // 行军接敌（74）：这几种命令的人，路上射程内有敌就站住打。
   //   **只有一份名单，两处读**（unitThink 设 targetId、移动循环决定挪不挪步）——
   //   分两处各写一遍，迟早会有一处忘改，那时兵会一边站住一边走，或者一边走一边挨打。
@@ -765,39 +794,19 @@
     return n;
   }
 
-  // ── 阵型（2026-10-28 ㊵）：**只记状态，不进任何数值计算** ────────────
-  // 设定是"成阵迎战有加成，撤退/强攻等会破阵"。加成怎么算还没定，
-  //   所以 BONUS 故意留 1.0 当占位，伤害/士气/防御一处都不读 formation。
-  // 以后接机制只改两个地方：BONUS 的数值 + 它的消费点（attack 里），
-  //   不要在别处散着判 u.formation，否则又是两套规则并存。
+  // ── 阵型（109 重写）：**不再是独立账本，而是戒备的派生量** ──────────────
+  // 109 定的模型（`GAME_RULES` §4.9）：玩家只有一个开关——列阵/戒备。
+  //   开＝两档自动切（走且没敌情＝行军，停下或已进战斗＝战斗），关＝散阵。
+  //   所以"成阵/散阵"不可能与戒备不一致，也不需要计时器。
+  // 上一版（98）在这里另存 `u.formation` + `BREAK_ORDERS`（撤退/强攻在途即破阵）
+  //   + `REGAIN_SEC`（站定 6 秒重整）。三条与 109 直接对立：① 109 要求"进攻时也保持
+  //   战斗队形"，而 BREAK_ORDERS 把 ATTACK 算成破阵；② 109 是"停下就是战斗队形"，
+  //   没有 6 秒；③ 两套状态会在面板上同时显示（「方阵（已结阵）」与模板名各说一套）。**已删。**
+  // `u.formation` 保留为**派生量**（同 104 的 x/y 派生自 cx/cy）：只有 syncFormation 写，别处只读。
   const FORMATION = {
-    BONUS: 1.0,               // ← 占位：成阵伤害/防御系数，当前恒为 1（等于没有）
-    REGAIN_SEC: 6,            // 站定且未接敌满 6 秒，重新结阵
-    BREAK_ORDERS: ['RETREAT', 'ATTACK']   // 撤退、强攻在途即破阵
+    BONUS: 1.0                // ← 占位：成阵的战斗力系数，当前恒为 1（等于没有）。
+                              //   接机制时改这里 + 它的消费点（attack），别在别处散着判 u.formation。
   };
-  function breakFormation(u, why) {
-    if (!u || u.hp <= 0) return false;
-    u.formationSteady = 0;
-    if (u.formation === 'BROKEN') { u.formationWhy = why; return false; }
-    u.formation = 'BROKEN'; u.formationWhy = why;
-    return true;
-  }
-  function updateFormation(u, dt) {
-    if (u.hp <= 0) return;
-    if (u.isRouted) { breakFormation(u, '溃退'); return; }
-    if (FORMATION.BREAK_ORDERS.includes(u.order)) {
-      // 98：冲锋期间破阵原因要写「全力冲锋」，不能每步被「强攻」覆回去（Q40 要 formationWhy）。
-      breakFormation(u, u.rush ? '全力冲锋' : (u.order === 'RETREAT' ? '撤退' : '强攻'));
-      return;
-    }
-    if (u.formation === 'BROKEN') {
-      if (u.path.length || u.targetId) { u.formationSteady = 0; return; }
-      u.formationSteady += dt;
-      if (u.formationSteady >= FORMATION.REGAIN_SEC) {
-        u.formation = 'FORMED'; u.formationWhy = null; u.formationSteady = 0;
-      }
-    }
-  }
 
   // ── 将领（2026-10-28 ㊵）：部队不全灭，将领不死 ──────────────────
   // 主将和以后的各级将领共用这一条判定：将不单独持有血量，它的命挂在部队上。
@@ -1066,7 +1075,17 @@
     //   动了就是全盘数值重算。为什么不做 getter：全库读 x/y 上百处，隐式拦截会让"谁写了坐标"
     //   查不出来；同步点收敛到积分器一处，显式更好查。
     // `progress` 103 起是**历史字段**：不参与成像、不参与移动，全是 0。留着只为不惊动外部探针。
-    return Object.assign({x,y,cx:x,cy:y,path:[],progress:0,attackTimer:0,turnTimer:0,targetId:null,
+    const o = Object.assign({x,y,cx:x,cy:y,path:[],progress:0,attackTimer:0,turnTimer:0,targetId:null,
+      // 107：行进朝向（弧度）。**d 层的账本**，不是渲染状态——位移要用它打折，所以只能在这里。
+      //   troop.js 的队形 head 每帧**只读**它，两边不许各存一份（存了就会分叉：
+      //   位移慢转、队形快转，画面是"队形朝东、人往西漂"）。初值在下面按开局朝向给。
+      turn:null,
+      // 108：本步的**实际行进速度**（格/秒，已含地形、姿态、冲锋、转身折扣）。
+      //   给 e1 做"队形随速度拉伸"用。为什么由 d 层写、不让 e1 自己拿 cx 差分估：
+      //   cx 只在 20Hz 步里更新，60fps 下差分是"三帧 0、一帧一大跳"，
+      //   实测平滑后仍抖 0~2.19、均值 0.69（真值 3.0）——那是**第二个速度账本**，必然错。
+      //   107 的教训（朝向只能有一个账本）在这里同样成立。**只写不读**，不影响任何判定。
+      spd:0,
       isRouted:false,state:'待命',order:null,hold:null,lastHitBy:null,thinkTimer:0,
       // 78：压制（伏着不主动接敌）与"在等什么"（面板要看得见）。两者都是**部队上的状态**，
       //   不是队列的内部变量——副将汇报、面板、测试读的都是部队，不是队列。
@@ -1077,8 +1096,11 @@
       //   显式列进这里，否则 Object.assign 不会补，读到的全是 undefined）。
       //   lastFightAt＝最近一次交火结算的时刻（攻守双方都盖章）；warnBlock＝还剩多少秒报不了警。
       lastFightAt:-1,warnBlock:0,
-      guard:0,guardHold:0,guardFloor:0,stance:'MARCH',stamina:STAMINA.MAX,
-      formation:'FORMED',formationWhy:null,formationSteady:0,leader:null,
+      // 109：`stance` 是**唯一开关**，取值 LOOSE（散阵）/ FORMED（列阵）。旧值 MARCH/GUARDED 已退役。
+      guard:0,guardHold:0,guardFloor:0,stance:'LOOSE',stamina:STAMINA.MAX,
+      // 109：`formation`/`formationWhy` 是**派生量**（由 stance 推出），只有 syncFormation 写。
+      //   开局没开戒备，所以是散阵。
+      formation:'BROKEN',formationWhy:'散阵',leader:null,
       // 97：活捉开关与"这支部队是被俘下场"的标记。两者都是**部队上的状态**，
       //   不是命令层的变量——播报、结局、测试读的都是部队。
       captureMode:false,captured:false,
@@ -1095,6 +1117,13 @@
       // 数值框架（2026-11-12）：新字段必须显式列进 base() 的默认值（83 的教训），
       //   否则 Object.assign 不会替你补上，读到的会是 undefined。
       上限键:null, 伤兵:0, 混编成分:null, 兵力余数:0}, extra);
+    // 107：行进朝向的初值＝开局的战斗朝向。不这么做，第一次下令会先"凭空转半圈"
+    //   （初值 0 ＝朝北，而蓝方开局朝东 facing=2），像是新兵蛋子刚上战场。
+    if (o.turn == null) {
+      const f = facingVec(o.facing);
+      o.turn = Math.atan2(f[1], f[0]);
+    }
+    return o;
   }
 
   // 兵种数值。damage 于 2026-10-28 砍半（枪 12→6 / 弓 8→4 / 骑 18→9），
@@ -1368,6 +1397,13 @@
   //   （amove_test [2] 实测：状态在 交战/迎敌/接敌停步 三处来回跳）。
   //   1e-6 格 ≈ 3e-5 屏幕像素，规则与肉眼都到不了这个量级。
   const RANGE_EPS = 1e-6;
+  // 105：射程按**边缘距**算。105 把方阵铺到 3 格宽之后，"锚点距 ≤ range"会让两支
+  //   3 格宽的线阵叠着打——探针实测接敌时两队共用 2 格 footprint，正面互相插进去。
+  //   所以每侧补一个"部队半径"：REACH=1 格（阵型最远的兵位在锚点外 1 格，七个阵型都是）。
+  //   效果：近战 range 仍是 1（数值表一个字不改），但实际接敌锚点距变成 3 格、
+  //   边缘隔 0.3 格 ≈ 8px —— 贴住而不重叠；弓兵 5 变成锚点距 7、边缘 4.3 格
+  //   （104 是锚点距 5、边缘 4.1），射程观感不变。
+  const REACH = 1, REACH2 = REACH * 2;
   function contX(o){ if(o.cx!=null&&Math.abs(o.cx-o.x)>GAP_EPS){o.cx=o.x;o.cy=o.y;} return o.cx==null?o.x:o.cx; }
   function contY(o){ if(o.cy!=null&&Math.abs(o.cy-o.y)>GAP_EPS){o.cy=o.y;o.cx=o.x;} return o.cy==null?o.y:o.cy; }
   function distance(a,b){return Math.hypot(contX(a)-contX(b),contY(a)-contY(b));}
@@ -1602,7 +1638,7 @@
   function moraleWord(m){return m>=75?'高昂':m>=50?'稳定':m>=30?'动摇':'濒溃';}
   function startRout(unit){
     if(unit.hp<=0||unit.isRouted)return;unit.isRouted=true;unit.targetId=null;unit.attackTimer=0;unit.order=null;unit.goal=null;unit.state='溃退';   // 103：不写坐标，位置留在原处
-    unit.stance='MARCH';   // 溃退的部队顾不上戒备，精力开始回复
+    unit.stance='LOOSE';   // 109：溃退强制散阵（优先级最高），精力开始回复
     const path=findSafePath(unit);unit.path=path||[];
     // 一支部队溃退会带崩身边友军；这里直接扣减，避免连锁递归无限展开
     // 友军溃退的打击：比"被击破"轻——兵还在、能重整回来，只是这一阵不能打了
@@ -1626,7 +1662,7 @@
     const dirs=new Set();
     for(const o of allUnits){
       if(o.hp<=0||o===target||o.team===target.team||o.targetId!==target.id)continue;
-      if(distance(o,target)>o.range+.5)continue;
+      if(distance(o,target)>o.range+.5+REACH2)continue;
       const a=Math.atan2(o.y-target.y,o.x-target.x);
       dirs.add(Math.min(3,Math.floor((a+Math.PI)/(Math.PI/2))));
     }
@@ -1636,7 +1672,7 @@
   function findAttackPath(unit,target,from){
     // 81：原来是"目标周围每个落点各跑一次 A*"——弓兵射程 5 是 81 次、136 格外要 7.9 秒。
     //   现在一次搜索、终点是"射程内所有站得下的格子"，取到的仍是代价最小的那条路。
-    const tx=target.x,ty=target.y,R=unit.range;
+    const tx=target.x,ty=target.y,R=unit.range+REACH2;
     // 目标不在图上就直说，别让搜索去跑一遍空集合再返回 null：81 的验收脚本把敌军挪到
     //   (-50,-50) 之后拿到"无法抵达"，看着像寻路坏了，其实是**目标根本不在图上**。
     if(!Number.isFinite(tx)||!Number.isFinite(ty)) return null;
@@ -1684,14 +1720,13 @@
   // ── 全力冲锋（98，Q36/Q38/Q40；100 轮起真加速）─────────────────────
   // 2026-11-17 上司拍板：冲锋要**有收益也有减益**。
   //   收益：速度 +50%（这里）、一定时间内加士气（见 setRush 的 changeMorale）。
-  //   减益：消耗体力（STAMINA.CHARGE 4.0/秒）、破坏阵型（breakFormation，6 秒后自动重整）。
+  //   减益：消耗体力（STAMINA.CHARGE 4.0/秒）。**109 起不再破坏阵型**——见 setRush 里的说明。
   // 98 时不加速的理由是「+50% 速度却零代价会严格占优」——现在代价有了，可以开这一格。
   // **阵型收益未定**：`FORMATION.BONUS` 仍是 1.0，所以「破阵」今天还不是真代价，
   //   冲锋的实际成本目前只有体力。这条不解决，冲锋可能偏强，见 ROADMAP 挂账。
   const RUSH = { SPEED_MULT: 1.5 };
   // 开关：改速度、给一次性士气、破阵型、烧体力（100 轮起）。**不进伤害公式**（Q40 不变）。
-  //   on 时顺手 breakFormation，让状态栏/formationWhy 说清「这队散了是因为全力冲锋」；
-  //   REGAIN_SEC=6 的恢复仍走 updateFormation，复用现成计时，不另起一套。
+  //   109 起不再动阵型状态：冲锋属于战斗档（见 `GAME_RULES` §4.9 的优先级表）。
   function setRush(list,on,silent,target){
     // **复位时不筛溃退/阵亡**：Q40 要求「溃退即收场」，若把这类部队过滤掉，
     //   u.rush 就会永远留在尸体/溃兵上（footprint_test 收场④ 抓到的真缺陷）。
@@ -1702,7 +1737,14 @@
       u.rush=!!on;
       u.rushTarget=on?(target||null):null;
       if(on){
-        breakFormation(u,'全力冲锋');
+        // 109：**不再破阵**。全力冲锋是"战斗档里的一种特殊形态"（RUSH），不是散阵——
+        //   上司的口径是"进入战斗后、向敌军移动/进攻时也保持战斗队形"，而 98 那条
+        //   「冲锋即破阵」与它正相反。冲锋的代价只剩体力（4/秒）：
+        //   FORMATION.BONUS 本来恒 1.0，破阵当时只是个标签，删掉不减任何战力。
+        // 109：冲锋同时**转入列阵**。否则"散阵＋冲锋"这条命令没有任何画面
+        //   （pickFormation 先看开关），而冲锋本来就是战斗行为——
+        //   与"看见敌人自动开戒备"同性质，不是替玩家做决定。
+        u.stance='FORMED';
         changeMorale(u,MORALE.CHARGE);   // 起手提气；之后按 0.2/秒 回落＝「一定时间内」
       }
     }
@@ -1717,7 +1759,7 @@
   //   98 真机抓到的一条（只查"下令那一刻"的尺子会漏）：**`targetId` 是下 ATTACK 令时就挂上的**
   //   （orderAttack 直接赋值、那时人还在几十格外），它不是"接战"。拿 `!!u.targetId` 当判据，
   //   第二段 RUSH_ON 刚打开就在下一个逻辑步被自己清掉：回执写着「全力冲锋」，画面一帧都没切。
-  //   接战只认"真的进到射程里"——与 4) 交火结算同一个 `distance(u,t)<=u.range+RANGE_EPS`，
+  //   接战只认"真的进到射程里"——与 4) 交火结算同一个 `distance(u,t)<=u.range+RANGE_EPS+REACH2`，
   //   不许再拿"目标是否已被指派"来代判。
   function updateRush(u){
     if(!u||!u.rush)return;
@@ -1727,7 +1769,7 @@
       gone=!t||t.hp<=0||!!t.isRouted;
     }
     const t=u.targetId?targetById(u.targetId):null;
-    const engaged=!!t&&t.hp>0&&distance(u,t)<=u.range+RANGE_EPS;
+    const engaged=!!t&&t.hp>0&&distance(u,t)<=u.range+RANGE_EPS+REACH2;
     if(engaged||gone||u.hp<=0||u.isRouted)setRush([u],false,true);
   }
   // ── 加速行军（101）────────────────────────────────────────────────
@@ -1833,6 +1875,29 @@
     u.cx=x;u.cy=y;u.x=Math.round(x);u.y=Math.round(y);
     u._rx0=u.cx;u._ry0=u.cy;
     return u;
+  }
+  // ── 107：把 `u.turn` 朝 `want` 转一步，返回转向**之后**的朝向与速度折扣 ──
+  // `used` 是本步真正用掉的时间（可能因为跨格只走了一部分），返回 `cos` 供速度打折。
+  //
+  // 角度差用 `atan2(sin,cos)` 折到 (-π,π]：这是唯一在 ±π 边界上**稳定**的写法。
+  //   troop.js 原来那套 `((want-cur+3π)%2π)-π` 在 JS 里踩了一个坑——`%` 对负数返回负，
+  //   `want-cur` 越过 π 那一帧结果会翻符号。107 探针实测到：反向途中冒出过一帧 +45°
+  //   （head 从 -152° 跳回 -106° 再继续转），玩家看到的是"转身转到一半抽了一下"。
+  //   顺手在这里统一成 atan2 版，troop.js 那边也换。
+  //
+  // 不用 `sign(0)=0` 那种边界写法：`d` 恰好为 0 时 `u.turn=want` 一句就够，
+  //   走 `Math.sign(0)*step` 会让朝向停住不动（NaN 是另一回事，want 保证有限）。
+  function steerTurn(u, want, dt){
+    if (!Number.isFinite(want)) return { ang: u.turn == null ? 0 : u.turn, cos: 1 };
+    const cur = u.turn;
+    if (cur == null || !Number.isFinite(cur)) { u.turn = want; return { ang: want, cos: 1 }; }
+    const d = Math.atan2(Math.sin(want - cur), Math.cos(want - cur));
+    const step = TURN.RATE * dt;
+    const moved = Math.min(Math.abs(d), step);
+    if (moved > 0) u.turn = Math.atan2(Math.sin(cur + Math.sign(d) * moved), Math.cos(cur + Math.sign(d) * moved));
+    // 折扣按**转完之后**剩下的夹角算：转到位这一步就全速，不必再等一帧。
+    const rest = Math.abs(d) - moved;
+    return { ang: u.turn, cos: Math.cos(rest) };
   }
   // 寻路起点＝判定格（u.x/u.y）＝离兵最近的那一格，与成像位置一致。
   //   103 时它等于"已经到达的格心"，比连续坐标落后；第一版直接改成 round(cx) 又踩了另一个坑：
@@ -1941,10 +2006,10 @@
     // 护卫：优先打接近被护卫者 3 格内的敌人（敌贴近到 2.2 就脱离判定会漏；3 格≈贴身威胁圈）
     if(u.goal.escort){
       const threat=enemies.find(x=>x.hp>0&&distance(x,t)<=3);
-      if(threat&&distance(u,threat)<=u.range+1){u.targetId=threat.id;u.state='交战';return;}
-      if(threat&&distance(u,threat)>u.range+1){u.targetId=threat.id;u.path=findAttackPath(u,threat)||[];u.state=u.path.length?'接近目标':'交战';return;}
+      if(threat&&distance(u,threat)<=u.range+1+REACH2){u.targetId=threat.id;u.state='交战';return;}
+      if(threat&&distance(u,threat)>u.range+1+REACH2){u.targetId=threat.id;u.path=findAttackPath(u,threat)||[];u.state=u.path.length?'接近目标':'交战';return;}
     } else if(!u.path.length){
-      const foe=enemies.find(x=>x.hp>0&&distance(u,x)<=u.range+RANGE_EPS);
+      const foe=enemies.find(x=>x.hp>0&&distance(u,x)<=u.range+RANGE_EPS+REACH2);
       if(foe){u.targetId=foe.id;u.state='交战';return;}
     }
     u.targetId=null;
@@ -2025,7 +2090,7 @@
     // 接敌＝暂停（不清目标）：敌人进入 4 格但还不在射程（够不着也走不动）→ 暂停；
     // 射程内 → 交战（unitThink 管）；敌人退出 4 格/被消灭 → 自动恢复推进
     const nearFoe=allUnits.filter(o=>o.hp>0&&o.team!==u.team&&distance(u,o)<=AWARE.CLOSE);
-    const outOfReach=nearFoe.length&&nearFoe.every(o=>distance(u,o)>u.range+RANGE_EPS);
+    const outOfReach=nearFoe.length&&nearFoe.every(o=>distance(u,o)>u.range+RANGE_EPS+REACH2);
     if(u.goal.attack){u.goal.paused=false;u.state='推进';}   // A 过去：接敌不暂停，交火循环+unitThink 处理边走边打
     else if(outOfReach){
       if(!u.goal.paused){u.goal.paused=true;u.state='接敌暂停';if(u.team==='blue')toast(`${u.name}与敌对峙，暂停推进。`);}
@@ -2098,10 +2163,16 @@
   //   · 每格再验一遍"可站、可达、本命令里没人占过"。taken 是**这次分配的账本**，
   //     不是全局占位：occupied 只看当前位置，管不住"两支同时开向同一格"——
   //     那样的合围会有一路挤成一堆，包围圈是假的。
-  const RING8=[[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]];   // 北 东北 东 东南 南 西南 西 西北
-  function nearestStand(u,tx,ty,taken){
-    const cands=[];
-    for(let y=ty-3;y<=ty+3;y++)for(let x=tx-3;x<=tx+3;x++){
+  // 105：合围半径 1 → 3。半径 1 的八个方位现在**落在目标自己的 footprint 里面**
+  //   （方阵铺开后占 ±1 格），围上去等于和敌人插在同一格，`cellFreeFootprint` 会全部拒掉。
+  // 半径 3 是被体积逼出来的**上限**，不是选出来的：目标占 3×3，外圈只剩 5×5−3×3=16 格，
+  //   而每支围位也占 3×3 ⇒ 几何上只有正四方位（±3,0 / 0,±3）能放下，斜方位会与邻位叠格。
+  //   也就是说：**铺开之后 8 支围不住一支，贴身的最多 4 支**，其余只能站在外圈堵路。
+  //   这是 3×3 体积的代价之一，写进 GAME_RULES §4.6 —— 不是 bug，别"修"回去。
+  const RING8=[[0,-3],[3,-3],[3,0],[3,3],[0,3],[-3,3],[-3,0],[-3,-3]];   // 北 东北 东 东南 南 西南 西 西北
+  function nearestStand(u,tx,ty,taken,rad){
+    const R=rad||3, cands=[];
+    for(let y=ty-R;y<=ty+R;y++)for(let x=tx-R;x<=tx+R;x++){
       if(!inside(x,y)||tileBase(x,y)==='river')continue;
       // 98（Q6）：同上，围位不再因 cover 而剔除候选格。
       if(!cellFreeFootprint(u,x,y))continue;   // 98（Q29）：整块 footprint 都空
@@ -2120,15 +2191,18 @@
     const a0=Math.atan2(live[0].y-center.y,live[0].x-center.x);
     for(let i=0;i<n;i++){
       const ang=a0+i*2*Math.PI/n;
-      let tx,ty;
-      if(n<=8){
-        const k=((Math.round(ang/(Math.PI/4))%8)+8)%8;
-        tx=center.x+RING8[k][0];ty=center.y+RING8[k][1];
-      }else{
-        const r=2.25+Math.floor(i/8)*1.2;
-        tx=Math.round(center.x+Math.cos(ang)*r);ty=Math.round(center.y+Math.sin(ang)*r);
+      // 105：围位改成"沿自己的方位由近及远找第一个站得下的块"，不再查表取 (dx,dy)。
+      //   查表那版在半径 1 时代是准的（八方位 1 格远）；铺开到 3×3 之后，半径 1、2 的格
+      //   全落在目标自己的 footprint 里，只能靠 `nearestStand` 的 ±3 邻域乱挪 ——
+      //   探针实测挪出 2.00/3.61/3.61/4.24 这种毫无规律的一串，超过接敌距离的支
+      //   到了围位也打不着（守位不会主动上）。逐圈外扩后，每支都落在**自己方位上**
+      //   最近的空块：3×3 目标 ⇒ 自动落到半径 3，正是接敌距离；人多了才往外挤一圈。
+      let cell=null;
+      for(let r=1;r<=7&&!cell;r++){
+        const tx=Math.round(center.x+Math.cos(ang)*r), ty=Math.round(center.y+Math.sin(ang)*r);
+        if(taken.some(t=>t.x===tx&&t.y===ty))continue;
+        cell=nearestStand(live[i],tx,ty,taken,1);
       }
-      const cell=nearestStand(live[i],tx,ty,taken);
       if(!cell)continue;
       taken.push({x:cell.x,y:cell.y});
       out.push({unit:live[i],x:cell.x,y:cell.y});
@@ -2328,7 +2402,7 @@
       //   只判距离会让弓兵隔着山脊打一支玩家根本看不见的敌人——回执还得把它的名字和距离念出来。
       if(known&&!known.has(e.id))continue;
       const d=distance(u,e);
-      if(d>u.range+.5)continue;
+      if(d>u.range+.5+REACH2)continue;
       if(!best||d<best.dist)best={foe:e,unit:u,dist:d};
     }
     return best;
@@ -2362,22 +2436,33 @@
     return {ok,defied};
   }
   // 戒备/常行/停止/群体撤退：执行 + 播报一体，返回计数供命令日志归类
+  // 109：**这是唯一的阵型命令**。"转入戒备"＝保持战斗队形（走起来自动转行军、停下来自动转战斗），
+  //   "转为常行"＝散阵。"列阵/结阵/布阵"这些词在 b 层归到这一条（见 understand.js）。
   function stanceUnitsOn(list){
     const live=list.filter(u=>u.hp>0&&!u.isRouted);
     let ok=0,tired=0;
     for(const u of live){
-      if(u.stance==='GUARDED'){ok++;continue;}
+      if(u.stance==='FORMED'){ok++;continue;}
       if(u.stamina<STAMINA.REARM){tired++;continue;}
-      u.stance='GUARDED';ok++;
+      u.stance='FORMED';ok++;
     }
-    toast(`${ok} 支部队进入戒备：正面视野 ${DETECT} → ${DETECT+GUARD.VISION} 格、遇敌不再发懵；代价是速度 ×0.8、精力行军 2.2/秒${tired?`。${tired} 支精力低于 ${STAMINA.REARM}，无法戒备`:''}。`);
+    toast(`${ok} 支部队转入列阵：保持战斗队形，正面视野 ${DETECT} → ${DETECT+GUARD.VISION} 格、遇敌不再发懵；代价是速度 ×0.8、精力行军 ${STAMINA.GUARD.move}/秒${tired?`。${tired} 支精力低于 ${STAMINA.REARM}，撑不起阵型`:''}。`);
     return {ok,tired};
   }
   function stanceUnitsOff(list){
     const live=list.filter(u=>u.hp>0&&!u.isRouted);
-    let n=0;for(const u of live)if(u.stance==='GUARDED'){u.stance='MARCH';n++;}
-    toast(n?`${n} 支部队转入常行，精力开始回升。`:'没有部队处于戒备。');
-    return {n};
+    let n=0,seen=0;
+    for(const u of live){
+      if(u.stance!=='FORMED')continue;
+      // 109：**已目视敌军的部队关不掉**——`updateStanceAuto` 下一步就会把它开回去，
+      //   让它"关成功"就是个点了没反应的假按钮（UI 那边也置灰，同一句话）。
+      if(u.alert==='ALERT'){seen++;continue;}
+      u.stance='LOOSE';n++;
+    }
+    toast(seen
+      ? `${seen} 支部队已目视敌军，散不得阵${n?`；另 ${n} 支转入散阵`:''}。要收队先脱离接触。`
+      : (n?`${n} 支部队转入散阵，精力开始回升。`:'没有部队处于列阵状态。'));
+    return {n,seen};
   }
   function stopUnits(list){
     const live=list.filter(u=>u.hp>0&&!u.isRouted);
@@ -2517,11 +2602,13 @@
       if(distance(w,target)>GUARD.SOUND_RADIUS)continue;
       if(w.guard<GUARD.SOUND)w.guard=GUARD.SOUND;
     }
-    // 围攻：同时被越多不同方向的敌人打，阵型越容易散。**只记状态，不扣士气**
-    //   （2026-11-13「挨一刀不减」：弧向 0.75/1.25/1.5 已经在伤害里算过一遍，
-    //    再按弧向/包夹扣一次士气，是同一件事的第二处表达）。
+    // 围攻（109 改动）：**这里不再破阵**。弧向/包夹本来就在伤害里算过（0.75/1.25/1.5），
+    //   98 那条「被包夹 → breakFormation」随"阵型账本合并"一起删：109 的模型里
+    //   "散阵"只由"关戒备"一个入口产生，再留第三个入口就又是两套规则。
+    //   真要保留"被围攻就散"，它属于下轮的阵型增益（按 `formIntegrity` 打折那一条），
+    //   不是这里再写一次 breakFormation。挂账见 `ROADMAP` 26。
+    //   注意：`surround` 仍然要算——播报里"（N 面包夹）"读的就是它，只是不再动阵型状态。
     const surround=surroundDirections(target);
-    if(surround>1)breakFormation(target,'被包夹');
     // 交火盖章：攻守双方都算"正在交战"，士气不再向稳态靠近（见 isEngaged）。
     //   放在这里而不是 attack 开头，是因为中途有早退分支；能走到这行才算真的打上了。
     attacker.lastFightAt=simTime;target.lastFightAt=simTime;
@@ -2639,10 +2726,10 @@
             e.path=p||[];
           }
           // 查证＝戒备：小心推进。速度 ×0.8、烧精力，所以敌人也会累，可以被他拖疲
-          if(e.path.length){e.stance='GUARDED';e.state='查证';return;}
+          if(e.path.length){e.stance='FORMED';e.state='查证';return;}
         }
         // 到了最后目击点却没人：放开戒备，等情报随戒备消退而作废
-        e.path=[];e.stance='MARCH';e.state='警戒';
+        e.path=[];e.stance='LOOSE';e.state='警戒';
         return;
       }
       patrolStep(e);
@@ -2653,8 +2740,8 @@
     if(e.type==='骑兵'){const arcs=visible.filter(u=>u.type==='弓兵');if(arcs.length)pool=arcs;}
     const target=pool.slice().sort((a,b)=>distance(e,a)-distance(e,b))[0];
     e.targetId=target.id;
-    e.stance='GUARDED';            // 已经咬上了，当然处于戒备
-    if(distance(e,target)<=e.range+RANGE_EPS){e.path=[];e.state='交战';return;}
+    e.stance='FORMED';             // 已经咬上了，当然处于戒备
+    if(distance(e,target)<=e.range+RANGE_EPS+REACH2){e.path=[];e.state='交战';return;}
     // 弓兵被近战贴脸则后撤拉开距离
     if(e.type==='弓兵'){
       const melee=visible.filter(u=>u.type!=='弓兵').sort((a,b)=>distance(e,a)-distance(e,b))[0];
@@ -2670,7 +2757,7 @@
   // 玩家会以为 AI 退化了；有了它才有"撞上巡逻队"和"绕过巡逻队"。
   function patrolStep(e){
     const route=e.patrol;
-    e.stance='MARCH';               // 巡逻是常行：在找人，但没绷紧（所以玩家从侧面摸过来还有机会）
+    e.stance='LOOSE';               // 巡逻不开阵：在找人，但没绷紧（所以玩家从侧面摸过来还有机会）
     if(!route||!route.length){e.path=[];e.state='驻守';return;}
     // **归队优先**（54）：人在巡防区外就先回区，再谈巡逻。
     //   为什么要有：扩图后从西岸撤回东岸要走 20 多格，中途阶段已经从 PRESS 落回 PATROL，
@@ -2797,8 +2884,8 @@
   function orderHoldFire(e){ if(e.targetId){e.targetId=null;} }
   function engage(e,target){
     e.targetId=target.id;
-    e.stance='GUARDED';            // 已经咬上了，当然处于戒备
-    if(distance(e,target)<=e.range+RANGE_EPS){e.path=[];e.state='交战';return;}
+    e.stance='FORMED';             // 已经咬上了，当然处于戒备
+    if(distance(e,target)<=e.range+RANGE_EPS+REACH2){e.path=[];e.state='交战';return;}
     if(!e.path.length){const p=findAttackPath(e,target);e.path=p||[];}
     e.state=e.path.length?'接近':'交战';
   }
@@ -2817,9 +2904,9 @@
              ||findPath(e,sxOf(e),syOf(e),goal.x,goal.y);
         e.path=p||[];
       }
-      if(e.path.length){e.stance='GUARDED';e.state='查证';return;}
+      if(e.path.length){e.stance='FORMED';e.state='查证';return;}
     }
-    e.path=[];e.stance='MARCH';e.state='警戒';
+    e.path=[];e.stance='LOOSE';e.state='警戒';
   }
   // 情报里的坐标可能在河对岸或林子里，换算成"能站的那一格"
   //   52 修：夹的范围从"恒为巡防区"改成"人在区内才夹回区内"。
@@ -2890,14 +2977,14 @@
     //   撤退不去（那是拼命跑，还手就死在原地）、跟随不去（followStep 自己会索敌，别抢它的活）。
     // 站住不改 path：敌人死了/跑了，path 还在，接着走——这就是 A-move 与"停下不走了"的区别。
     if(u.path.length&&ENGAGE_STOP.includes(u.order)){
-      const t=nearestFoe(u,e=>distance(u,e)<=u.range+RANGE_EPS);
+      const t=nearestFoe(u,e=>distance(u,e)<=u.range+RANGE_EPS+REACH2);
       if(t){u.targetId=t.id;u.state='接敌停步';return;}
       u.targetId=null;
     }
     if(u.order==='RALLY'){
       // 集结中的部队同样会就地还击，不会站着挨打
       if(u.path.length){u.state='集结';return;}
-      const t=enemies.filter(e=>e.hp>0&&distance(u,e)<=u.range+RANGE_EPS).sort((a,b)=>distance(u,a)-distance(u,b))[0];
+      const t=enemies.filter(e=>e.hp>0&&distance(u,e)<=u.range+RANGE_EPS+REACH2).sort((a,b)=>distance(u,a)-distance(u,b))[0];
       if(t){u.targetId=t.id;u.state='交战';}
       else {u.targetId=null;u.state='集结待命';}
       return;
@@ -2918,7 +3005,7 @@
         return;
       }
       const h=holdOf(u);
-      const t=nearestFoe(u,e=>distance(u,e)<=u.range+RANGE_EPS);
+      const t=nearestFoe(u,e=>distance(u,e)<=u.range+RANGE_EPS+REACH2);
       if(t){u.targetId=t.id;u.state='交战';u.holdTick=0;return;}
       u.targetId=null;
       u.holdTick=Math.max(0,(u.holdTick||0)-dt);
@@ -2938,7 +3025,7 @@
       // 推进中"射程内有敌就站住打"上面已经拦掉了（行军接敌）；这里管的是没接敌的推进，
       //   以及停下时（推进结束/被地形卡住）就地还击——目标脱离射程就停火，交还给 goalStep。
       if(u.path.length){u.state='推进';return;}
-      const t=enemies.filter(e=>e.hp>0&&distance(u,e)<=u.range+RANGE_EPS).sort((a,b)=>distance(u,a)-distance(u,b))[0];
+      const t=enemies.filter(e=>e.hp>0&&distance(u,e)<=u.range+RANGE_EPS+REACH2).sort((a,b)=>distance(u,a)-distance(u,b))[0];
       if(t){u.targetId=t.id;u.state='交战';}
       else {u.targetId=null;u.state='待命';}
       return;
@@ -2947,7 +3034,7 @@
       if(!u.path.length&&u.hold){u.order='DEFEND';u.state='驻守';u.targetId=null;return;}   // 带目的地的撤退：到点转驻守
       if(!u.path.length){u.order=null;u.state='待命';u.targetId=null;return;}
       const attacker=u.lastHitBy?targetById(u.lastHitBy):null;
-      if(attacker&&distance(u,attacker)<=u.range+RANGE_EPS)u.targetId=attacker.id;else u.targetId=null;
+      if(attacker&&distance(u,attacker)<=u.range+RANGE_EPS+REACH2)u.targetId=attacker.id;else u.targetId=null;
       return;
     }
     if(u.order==='MOVE'){
@@ -2965,7 +3052,7 @@
     if(u.order==='ATTACK'&&u.targetId){
       const t=targetById(u.targetId);
       if(!t){u.targetId=null;u.order='MOVE';u.state='待命';u.path=[];return;}
-      if(distance(u,t)<=u.range+RANGE_EPS){u.path=[];u.state='交战';return;}
+      if(distance(u,t)<=u.range+RANGE_EPS+REACH2){u.path=[];u.state='交战';return;}
       if(!u.path.length){
         const p=findAttackPath(u,t);
         if(p&&p.length){u.path=p;u.state='接近目标';}
@@ -2974,9 +3061,52 @@
     }
   }
 
+  // ── 109：戒备的自动开关（`GAME_RULES` §4.9）──────────────────────────
+  // 只有三条规则：
+  //   ① 已目视（ALERT）→ 自动戒备，不分敌我、不看是谁开的。
+  //   ② ALERT/SUSPECT **落到** UNAWARE 的**那一次** → 自动解除。**看跃迁，不看状态**：
+  //      没敌人时 alert 一直是 UNAWARE，按状态判会把玩家刚开的戒备在下一步就关掉（永远开不起来）。
+  //   ③ 溃退 → 强制散阵（优先级最高）。
+  // 「不看来源」是刻意的：系统开的与玩家开的一视同仁，脱敌一起关——代价是守桥打退一波后要重新开。
+  // 体力撑不起时不自动开（门槛与手动开关同一个 = `REARM`），否则"看见敌人→开→见底→关→又看见"
+  //   会每一步来回翻，队形在方阵与散阵之间抽搐。
+  // "敌情多久没更新就作废"（109）。不另发明一个数，直接由 98 的认知回落推出来：
+  //   先保住 `AWARE.HOLD`(6 秒) 的"已目视"，之后戒备按 `GUARD.DECAY`(0.1/秒) 从 1 掉到
+  //   `GUARD.SHOW`(0.35) 还要 6.5 秒 —— 合计 12.5 秒，正是 98 里 alert 落到"未预期"的时刻。
+  //   自己开着的戒备会给 guard 加地板，所以这里不能直接读 alert/guard，只能按情报时间算。
+  const INTEL_TTL = AWARE.HOLD + (1 - GUARD.SHOW) / GUARD.DECAY;
+  function syncFormation(u){
+    const formed=u.stance==='FORMED';
+    u.formation=formed?'FORMED':'BROKEN';
+    u.formationWhy=formed?null:(u.isRouted?'溃退':'散阵');
+  }
+  function updateStanceAuto(u){
+    if(!u||u.hp<=0)return false;
+    let changed=false;
+    if(u.isRouted){
+      if(u.stance!=='LOOSE'){u.stance='LOOSE';changed=true;}
+    } else if(u.alert==='ALERT'){
+      if(u.stance!=='FORMED'&&u.stamina>=STAMINA.REARM){u.stance='FORMED';changed=true;}
+    } else if(u.stance==='FORMED'&&u.contact){
+      // ⚠️ 这里**不能**拿 `alert==='UNAWARE'` 当"敌情消失"：`SUSPECT` 的判据是
+      //   `guard>=GUARD.SHOW`，而"开戒备"把 guard 地板抬到 1 —— 换言之**自己开着戒备就
+      //   永远自认"有预期"，永远落不到 UNAWARE**，自动关一次也不会发生（实测死锁）。
+      //   所以改用"情报过期"这个真会消失的东西：`u.contact.t` 是最后一条目击/通报的时刻，
+      //   超过 `AWARE.HOLD`（6 秒）没刷新，就当敌情消失。
+      // 而且**必须"有 contact"才谈得上消失**：没敌情时手动开的戒备 contact 为 null，
+      //   用 prev/alert 判都会把它自己关掉（实测过，反例见 stance_test）。
+      // 关掉时顺手清 contact：判定敌情消失，就等于认定手里那份情报作废了。
+      if(simTime-u.contact.t>INTEL_TTL&&u.alert!=='ALERT'){
+        u.stance='LOOSE';u.contact=null;changed=true;   // ← 敌情消失那一次
+      }
+    }
+    const before=u.formation;
+    syncFormation(u);
+    return changed||before!==u.formation;
+  }
   // 戒备与精力。两条规则，一句能说清：
   //   命令戒备＝地板（不衰减，所以收费）；战场动静＝尖峰（免费，自己淡出）；两者取大。
-  function stanceOn(u){return u.stance==='GUARDED'&&u.stamina>STAMINA.FORCE_DROP;}
+  function stanceOn(u){return u.stance==='FORMED'&&u.stamina>STAMINA.FORCE_DROP;}
   function updateGuard(u,dt){
     if(u.hp<=0)return false;
     if(u.guardHold>0){
@@ -3023,8 +3153,8 @@
     if(drain>0)u.stamina=Math.max(0,u.stamina-drain*dt);
     else u.stamina=Math.min(STAMINA.MAX,u.stamina+STAMINA.RECOVER[phase]*dt);
     // 精力见底就强制掉档：这是"永远戒备"不成立的最后一道闸
-    if(u.stance==='GUARDED'&&u.stamina<=STAMINA.FORCE_DROP){
-      u.stance='MARCH';
+    if(u.stance==='FORMED'&&u.stamina<=STAMINA.FORCE_DROP){
+      u.stance='LOOSE';
       logEvent(`${u.name}精力见底，转入常行。`);
       return true;
     }
@@ -3297,7 +3427,7 @@
         // 判据用"射程内"而不是"有 targetId"：目标走出射程后这一帧就该重新迈步，
         //   不等下一帧 unitThink 来清（清 targetId 在交火结算里，晚半帧就会多站一会儿）。
         const stopFoe=u.targetId?targetById(u.targetId):null;
-        if(ENGAGE_STOP.includes(u.order)&&stopFoe&&stopFoe.hp>0&&distance(u,stopFoe)<=u.range+RANGE_EPS){u.state='接敌停步';continue;}
+        if(ENGAGE_STOP.includes(u.order)&&stopFoe&&stopFoe.hp>0&&distance(u,stopFoe)<=u.range+RANGE_EPS+REACH2){u.state='接敌停步';continue;}
         ensureCont(u);
         let timeLeft=dt;
         while(u.path.length&&timeLeft>0){
@@ -3322,17 +3452,25 @@
             if(mates.length>1)baseSpeed=Math.min(...mates.map(o=>o.speed));
           }
           // 戒备的即时代价：走得慢。防止"一边满速扑上去一边享戒备收益"
-          if(u.stance==='GUARDED')baseSpeed*=.8;
+          if(u.stance==='FORMED')baseSpeed*=.8;
           // 全力冲锋的即时收益：速度 +50%。代价在别处收（体力 4/秒 + 破阵），这里只管快。
           //   与戒备可叠加（×1.5×0.8=1.2）——"又要快又要戒备"本来就该两头付费。
           if(u.rush)baseSpeed*=RUSH.SPEED_MULT;
           // 101 加速行军：常行的 1.2 倍。**与冲锋不叠乘**（1.8 倍没人定过，只会让冲锋失去存在理由）：
           //   已经在冲就以冲锋为准，加速那一档被盖住、也不再单独扣 2.0。
           else if(u.forced)baseSpeed*=FORCED.SPEED_MULT;
-          const speed=baseSpeed*factor;
+          // 107：先转身再迈步。朝向按**本步剩余的时间**推进（跨格后剩下的时间在下一轮继续用），
+          //   速度按转向后残余夹角打折——背对目标时 cos≤0 ⇒ speed 0 ⇒ 这一帧原地转。
+          //   ⚠️ 必须在这里（速度算完之后、位移写之前）一次算完：分两处算转身，
+          //   就会出现"朝向按 A 时间转、位移按 B 时间走"，那正是 103 要消灭的双账本。
+          const steer=steerTurn(u,Math.atan2(dy,dx),timeLeft);
+          const speed=baseSpeed*factor*Math.max(0,steer.cos);
+          // 108：把本步的实际速度留给 e1（队形拉伸、微摆幅度按它走）。只写不读。
+          u.spd=speed;
           // 地形系数为 0（走不动）就停这一步。以前靠 `1/progress` 除出 Infinity 跳出循环，
           //   现在必须显式写——否则 while 里 timeLeft 不减，就是死循环。
-          if(!(speed>0)){timeLeft=0;break;}
+          // 107：转身没转过来（cos≤0）也走这一条——同样是"这一帧不挪步"，但朝向已经推进了。
+          if(!(speed>0)){u.spd=0;timeLeft=0;break;}
           const travel=speed*timeLeft;
           if(travel<dist){                      // 走不完这一格：插值，位置连续
             u.cx+=dx/dist*travel;u.cy+=dy/dist*travel;syncCell(u);timeLeft=0;
@@ -3345,6 +3483,7 @@
           }
         }
         if(!u.path.length){
+              u.spd=0;                       // 108：停步即"速度为 0"，队形拉伸随之收回
               if(u.team==='blue'){
                 if(u.order==='DEFEND'){
                   u.state='驻守';
@@ -3366,6 +3505,17 @@
         }
       }
 
+      // 1.5) 107：不走的部队也要转身——朝**战斗朝向** `facing`（接敌时由 turnToward 转过）。
+      //   不转的话，停下那一刻朝向就冻在"最后一次行进方向"上：一支守桥的枪兵会永远
+      //   背对来敌，正面判定（`attackArc` 的正面/侧面/背面）也就永远对它最有利。
+      //   速率与行进**同一个上限**，不另设一套；所以"停下 → 转身面向战场"是 0.6 秒。
+      //   只在 `path` 空时转：有路径的部队由 1) 的积分器按路径方向推进，两处都写就是双账本。
+      for(const u of allUnits){
+        if(u.hp<=0||u.path.length)continue;
+        const f=facingVec(u.facing);
+        steerTurn(u,Math.atan2(f[1],f[0]),dt);
+      }
+
       // 2) 认知：先判断谁看见了谁，AI 再基于这个判断行动
       for(const u of allUnits)if(updateAwareness(u,dt))awareDirty=true;
       // 2.2) 情报通报：看到的部队把方位传给身边友军，收的一方戒备抬起来
@@ -3384,8 +3534,9 @@
       // 101：加速行军的三种收场（接战／体力见底／溃退）。排在精力结算之后，
       //   这样"体力刚好掉到 15 以下"这一步就能当场收回档位，不用多等一帧。
       for(const u of allUnits)updateForced(u);
-      // 3.4) 阵型状态：只记"成阵/散阵"，本轮不进任何数值（见 FORMATION.BONUS 的占位说明）
-      for(const u of allUnits)updateFormation(u,dt);
+      // 3.4) 109：戒备的自动开关 + 派生成阵/散阵。排在 AI 之后——c′ 与 unitThink 都会写
+      //   stance，而"看见敌人必须戒备"是规则、不是 AI 的偏好，所以要覆盖它们这一步的选择。
+      for(const u of allUnits)if(updateStanceAuto(u))awareDirty=true;
       // 3.45) 编制（⑸9）的九兵位次 **67 起不在这里推进**：它归 troop.js（e1），
       //   由 main.js 每帧拿**真实帧 dt** 推 `TROOP.update()`。逻辑步决定事实、帧决定画面，
       //   混在 step 里会让队形在"没人动"的帧上冻住（按 20Hz 推进、却只在有变化时重绘）。
@@ -3398,7 +3549,7 @@
         if(u.reactTimer>0)continue;   // 措手不及：这几秒反应不过来，只能挨打
         const t=targetById(u.targetId);
         if(!t){u.targetId=null;continue;}
-          if(distance(u,t)<=u.range+RANGE_EPS){
+          if(distance(u,t)<=u.range+RANGE_EPS+REACH2){
             u.attackTimer-=dt;
             if(u.attackTimer<=0){attack(u,t);changed=true;}
           } else if(u.order==='DEFEND'||u.order==='ADVANCE'||u.order==='MOVE'){u.targetId=null;}
@@ -3838,7 +3989,7 @@
     // 行军接敌（74）：ENGAGE_STOP 是"路上遇敌会站住打"的命令名单，只有一份定义，
     //   unitThink 与移动循环都读它。测试断言名单里没有撤退与跟随。
     ENGAGE_STOP,
-    FORMATION,LEADER,leaderFalls,attachLeader,breakFormation,
+    FORMATION,LEADER,leaderFalls,attachLeader,updateStanceAuto,syncFormation,
     // 67：编制/队形整批搬到 troop.js（e1，全局名 TROOP）。d 层只留两条**同源查询**：
     //   foesWithin（九兵用不着，但 "u 身边几支敌军" 这个口径该只有一份）、facingVec（朝向→向量）。
     foesWithin,facingVec,
