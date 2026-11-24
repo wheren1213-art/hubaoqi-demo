@@ -464,7 +464,11 @@
     //   两处表达，而且旧回复速率下八秒就被补回去——"丢了本营"在体感上等于没发生。
     MORALE_HOLD: 12     // 失守之后**持续**压着的稳态亏空（本局余下的劣势，不是一次性的）
   };
-  const DETECT = 8;
+  // 平地最大视距。**2026-11-23 由 8 改成 12**：上司量的是"开局部队到地图边缘的距离"
+  //   （实测蓝方阵心 12.5 格、红方 10.5 格，取整 12）。改这个数等于改全部感知范围，
+  //   小地图亮区、副将话术"视野 N 格"、地形视野测试里写死的 8 都要一起跟随。
+  //   **戒备不再加视野**（同日拍板）：这里就是最终值，没有 `+2×guard` 那一层了。
+  const DETECT = 12;
 
   // 移动速度系数表**只有一份**。tileCost 用它算 A* 代价，移动推进用它算每帧走了多少。
   // ㊸ 加洼地时只补了 tileCost，移动那段还是内联表——部队走进洼地时 factor=undefined，
@@ -565,46 +569,35 @@
   //   （服务端会说"没找到"），而不是把"北面森林"硬指到南边的林子上——那会把命令送错方向。
   const LANDMARKS = WORLD.landmarks;
 
-  // 敌情认知：部队并不知道敌人在哪。
-  // 三档不是三个并列的状态机，而是两个量的投影：
-  //   知 = contact（位置与目击时刻），由"此刻看不看得见"决定；
-  //   备 = guard（戒备 0–1），由命令与战场动静共同决定。
-  // 已目视＝知+备；有预期＝只有备；未预期＝什么都没有。
+  // ── 遇敌状态（2026-11-23 重做，旧的一套作废）────────────────────────
+  // 只有一个问题要回答：**这一波接敌有多突然**。答案只在"第一次看见敌人"那一刻判一次，
+  //   之后整场遭遇不变，直到脱敌 6 秒后清零重判。
+  //
+  // 判据两条，缺一不可：
+  //   ① 看见时的距离：> MEET_RANGE → **已发现**（早早看见，从容列阵）
+  //   ② ≤ MEET_RANGE 时看戒备：开着 → **有预期**；关着 → **未预期**
+  //
+  // 为什么这样就能让埋伏成立：视线是三面分开的（正面 1.0 / 侧面 0.7 / 背面 0.4），
+  //   平地的 12 格落到背后只剩 4.8 格、钻进林子只剩 3 格——**几何本身就把人送进 8 格以内**，
+  //   不需要任何"埋伏加成"或"潜伏"状态。以后加夜战、雾天、斥候，只改这几个距离。
+  //
+  // 戒备**只有 0 和 1**（同日拍板）。它是玩家手里的一个开关（＝列阵＝战斗准备），
+  //   不接受友军通报、枪声、挨打这些外部来源——那些入口全部删除。
   const AWARE = {
-    HOLD: 6,           // 失去目视后仍算"已目视"的秒数，之后落入"有预期"
+    HOLD: 6,           // 脱敌计时：连续 6 秒没有新敌情（看不见、也没挨打）就清档，下次重新判
     FOREST_SIGHT: 3,   // 藏在森林里的部队，要贴到 3 格才暴露
-    SIDE_SIGHT: .7,    // 侧面视野系数（正面 8 格，侧面约 5.6 格）
-    BACK_SIGHT: .4,    // 背后视野系数（约 3.2 格，基本是盲区——这是绕后突袭能成立的根）
-    CLOSE: 4,          // 4 格内才算进入接战状态
-    REACT: {枪兵:1.5, 弓兵:2.5, 骑兵:1.0},  // 措手不及时的反应延迟（秒）
-    PANIC: 3,          // 慌乱持续秒数（只给界面与反应延迟用，本身不再扣士气）
-    // 2026-11-13：认知对士气的影响搬到 MORALE.MEET_*（三档离散、走"事件"通道）。
-    //   原来这里还有 PREPARED_BASE / EXPECTED_MAX / PANIC_BASE / AMBUSH_MORALE 四个数，
-    //   让同一件事（看没看见敌人）既压稳态、又在遭遇瞬间扣一次，属于重复计算，已删。
-    //   severity 仍是连续值——它管的是"多久不能还手"和"突袭伤害加成"，那是 98 定的另一套刻度。
-    AMBUSH_DMG: 1.5,   // 突袭加成：目标仍在反应延迟中时生效
+    SIDE_SIGHT: .7,    // 侧面视野系数（正面 12 格，侧面 8.4 格）
+    BACK_SIGHT: .4,    // 背后视野系数（4.8 格——这是绕后能成立的几何根，**不许随戒备变**）
+    MEET_RANGE: 8,     // 定档线：第一次看见时的距离。>8 已发现，≤8 按戒备分
     MAX_HIT: .4,       // 单次伤害上限（占目标最大生命比例），防止叠乘一击秒杀
-    SURPRISE_CD: 4,    // 死角遇袭的冷却，避免被持续压制时永久无法还手
-    WARN_RADIUS: 11,   // 友军之间通报敌情的半径
-    WARN_LAG: .5,      // 情报通报的节流间隔（秒）
-    INVESTIGATE: 1     // 有预期时前往最后目击点查证
+    INVESTIGATE: 1     // 有预期时前往最后目击点查证（只给 AI 用，不进玩家状态）
   };
-  // 戒备：命令给的是"地板"（不衰减，所以必须收费）；战场动静给的是"尖峰"（免费，自己淡出）。
-  // 两者取大。没有这条区分，"永远戒备"就是免费防御。
-  const GUARD = {
-    SHOW: .35,         // 到这个比例才算"有预期"
-    DECAY: .1,         // 没有来源时每秒回落
-    RISE: 2,           // 下令戒备后抬到满的速度（约 0.5 秒）
-    WARN: 1,           // 收到友军通报
-    VIS_HOLD: .6,      // 失去目视后的戒备下限
-    SOUND: .7,         // 听见 12 格内有人开火
-    SOUND_RADIUS: 12,  // 枪声传播半径
-    HIT_FLOOR: .6,     // 被击中后的戒备下限
-    HIT_TIME: 4,       // 被击中后的下限保持秒数
-    VISION: 2,         // 满戒备时正面视野 +2 格
-    SIDE: .15,         // 满戒备时侧面系数增量（0.7 → 0.85）
-    SEVERITY: .6       // severity = 1 - 0.6 × guard：全无准备 1、戒备充分 0.4
-  };
+  // 旧 `GUARD` 常量块整块删除（2026-11-23）。删掉的是：
+  //   SHOW/DECAY/RISE（0~1 渐变与"有预期"门槛）、WARN/VIS_HOLD/SOUND/SOUND_RADIUS
+  //   （通报与枪声抬戒备）、HIT_FLOOR/HIT_TIME（挨打抬戒备）、VISION/SIDE（戒备加视野）、
+  //   SEVERITY（severity 连续值）——它们共同的毛病是**让一个变量同时承担"玩家开关"和
+  //   "战场自动响应"**，于是必须再加"看见自动开／敌情过期自动关"两条兜底，撞出 109 的两个死锁。
+  // 现在戒备是纯开关，`u.guard` 降级为派生量（0/1，只有 syncFormation 写）。
   // 精力：戒备唯一的成本。它只管两件事——还能不能维持戒备、反应有多快。
   // 不去扣士气和伤害，免得玩家读不懂是哪个变量在杀他。
   // ── 精力（体力）＝独立资源 ──────────────────────────────────────────
@@ -674,26 +667,51 @@
     AURA: 10,          // 将旗光环：主将周围友军的稳态加成（暂定）
     AURA_RADIUS: 6,    // 光环半径（格）
     // 主将自身不吃光环：主将自己的部队也是部队，不因身份额外稳（2026-11-13 删 SELF_AURA）
-    // ── 事件：认知遭遇（三档离散，替代原来的连续严重度乘算）─────────
-    //   已目视＝在接战距离之外就先看见了 → 不吃冲击；
-    //   有预期＝近处才发现，但此前有通报或处于戒备 → 轻冲击，仍能向友军通报；
-    //   未预期＝近处才发现且毫无预警 → 重冲击，且措手不及期间报不了警。
-    MEET_SEEN: 0,      // 已目视（不加不减）
-    MEET_EXPECT: -5,   // 有预期（暂定）
-    MEET_BLIND: -12,   // 未预期（暂定）
+    // ── 事件：遇敌三档（2026-11-23 定档离散，**这是遇敌状态唯一的通道**）────────
+    //   已发现＝看见时距离 > MEET_RANGE（8 格），从容列阵 → 不吃冲击；
+    //   有预期＝≤8 格才发现、当时开着戒备 → 轻冲击（−10，约 50 秒回满）；
+    //   未预期＝≤8 格才发现、戒备关着 → 重冲击（−30，约 150 秒回满，接近一场遭遇的全程）。
+    // 这三个数是**按"士气→伤害"的台阶选的**，不是随手取整：
+    //   伤害 = round(基础 × 弧向 × 克制 × zeal)，zeal = 0.55 + 0.60×士气/100。
+    //   枪兵正面（7.5×zeal）的台阶分界在士气 97 / 75 / 53 / 31 / 8：满士气 9、70 是 7、
+    //   50 是 6、25 是 5、0 是 4。所以「−30」这一档在枪兵身上确实跨了一级（8→7），
+    //   与「有预期 −10」（9→8）分开；再往下要靠战时流失（被围）才走到 50 以下的台阶。
+    MEET_SEEN: 0,      // 已发现（不加不减）
+    MEET_EXPECT: -10,  // 有预期
+    MEET_BLIND: -30,   // 未预期
     // ── 事件：战果与损失（四个数都是暂定，等战报攒够再调）──────────
     KILL_SELF: 8,      // 击杀敌军的部队本人
     KILL_NEAR: 4,      // 击杀点附近友军（半径用 RADIUS）
-    ALLY_LOST: -8,     // 友军被击破（歼灭，兵没了）
     ALLY_ROUT: -4,     // 友军溃退（脱离控制但兵还在，能重整回来）
     LEADER_LOST: -15,  // 将领被击破（主将与副将同一档；主将阵亡时本局已结束，扣不扣看不见）
+    // ── 事件：友军被击破（2026-11-23 由固定 −8 改成按比例）──────────────
+    //   原来不管局面多糟都是 −8。固定点数在残局里等于没有：8 支时 −8 是 8%，
+    //   剩 3 支时 −8 还是 −8，但那一支已经是三分之一的家当。
+    //   现在按「本方还剩几支」折算，扣点 = BREAK_BASE × 满编支数 ÷ 死前支数：
+    //     8 支死 1 → −15（死前 8）；4 支死 1 → −30（死前 4）；封顶 −30，没有下限项。
+    //   越到后面每死一支越痛，溃败会加速——这是刻意的。
+    BREAK_BASE: 15,    // 满编（开局支数）时死一支扣这么多
+    BREAK_MAX: 30,     // 上限：残局里一支被歼灭最多扣 30，避免一次直接归零
+                       //   没有下限项：死前支数永远 ≤ 满编，所以扣点永远 ≥ BREAK_BASE，
+                       //   写一个"保底"只会是永远不触发的死代码。
+    // ── 战时流失：被多面围攻（2026-11-23 新增）──────────────────────────
+    //   交战中每秒扣 SIEGE_RATE × (围攻面数 − 1)：1 面不掉、2 面 −0.5/秒、
+    //   3 面 −1.0、4 面 −1.5。面数取 surroundDirections()（正在打我的敌人分布在几个象限）。
+    //   **与稳态的「兵力对比」不重复**：那条在交战中冻结、只在脱离交火后起作用；
+    //   这条只在打起来之后起作用。一个管战后回稳，一个管战时崩不崩。
+    SIEGE_RATE: .5,
     // ── 事件：全力冲锋（100 轮，上司 2026-11-17：「一定时间内增加士气」）──────
     //   起手一次性提气，之后按 UP（0.2/秒）回落——所以是「一定时间内」，不是永久。
     //   **如实记账**：士气稳态实测锁在 ~99，这一下撞顶后有效增量很小，伤害端约 2–3%；
     //   冲锋的收益主体仍是速度 +50%，士气这条挂在「士气失灵」老账下，别当它已生效。
     CHARGE: 12,
-    // ── 门槛与换算（本轮不动）───────────────────────────────
-    BONUS: .45,        // 伤害系数 = 0.7 + BONUS × 士气/100（满士气 1.15，崩溃 0.7）
+    // ── 门槛与换算（2026-11-23 第二轮：只保留伤害出口，但低士气压得更狠）──────
+    //   zeal = ZEAL_LO + (ZEAL_HI − ZEAL_LO) × 士气/100。
+    //   **上限 1.15 不动**：满士气的输出与原来逐点相同，所以对局时长不受这条影响；
+    //   动的只有低士气端——0 士气从 ×0.70 压到 ×0.55，未预期遇敌（70）从单刀 8 降到 7。
+    //   不抬上限的理由：抬上限等于全场 +N%，会连带动「对局 5–10 分钟」这条硬约束。
+    ZEAL_LO: .55,      // 士气 0 时的伤害系数（原 0.70）
+    ZEAL_HI: 1.15,     // 士气 100 时（不变）
     DEFY_AT: 50,       // 士气低于此值（动摇及以下）会抗命，拒绝进攻
     ROUT_AT: 25,       // 低于此值溃退
     RALLY_AT: 55,      // 溃退后在后方回复到此值即重整归队
@@ -796,16 +814,20 @@
 
   // ── 阵型（109 重写）：**不再是独立账本，而是戒备的派生量** ──────────────
   // 109 定的模型（`GAME_RULES` §4.9）：玩家只有一个开关——列阵/戒备。
-  //   开＝两档自动切（走且没敌情＝行军，停下或已进战斗＝战斗），关＝散阵。
-  //   所以"成阵/散阵"不可能与戒备不一致，也不需要计时器。
+  //   开＝两档自动切（走且没敌情＝行军，停下或已进战斗＝战斗），关＝未列阵。
+  //   所以"成阵/未列阵"不可能与戒备不一致，也不需要计时器。
   // 上一版（98）在这里另存 `u.formation` + `BREAK_ORDERS`（撤退/强攻在途即破阵）
   //   + `REGAIN_SEC`（站定 6 秒重整）。三条与 109 直接对立：① 109 要求"进攻时也保持
   //   战斗队形"，而 BREAK_ORDERS 把 ATTACK 算成破阵；② 109 是"停下就是战斗队形"，
   //   没有 6 秒；③ 两套状态会在面板上同时显示（「方阵（已结阵）」与模板名各说一套）。**已删。**
   // `u.formation` 保留为**派生量**（同 104 的 x/y 派生自 cx/cy）：只有 syncFormation 写，别处只读。
   const FORMATION = {
-    BONUS: 1.0                // ← 占位：成阵的战斗力系数，当前恒为 1（等于没有）。
+    BONUS: 1.0,               // ← 占位：成阵的战斗力系数，当前恒为 1（等于没有）。
                               //   接机制时改这里 + 它的消费点（attack），别在别处散着判 u.formation。
+    BREAK_MULT: 1.0           // ← 占位：**排不下**（`u.formFirm===false`）时增益要乘的比例。
+                              //   2026-11-23 上司拍板"按固定比例打折"（不是归零），比例本身待定，
+                              //   所以先填 1.0 让结构能跑、玩法不变。值定了**只改这一个数**，
+                              //   不要在 attack / morale 里各写一份。
   };
 
   // ── 将领（2026-10-28 ㊵）：部队不全灭，将领不死 ──────────────────
@@ -964,11 +986,14 @@
       arr.push({
         t: simTime, x: u.x, y: u.y, hp: u.hp, maxHp: u.maxHp, morale: u.morale,
         stamina: u.stamina, state: u.state, stance: u.stance, alert: u.alert,
-        isRouted: !!u.isRouted, guard: u.guard, pathLen: u.path.length, reactTimer: u.reactTimer,
+        isRouted: !!u.isRouted, guard: u.guard, pathLen: u.path.length, meet: u.meet,
         // ㊵：阵型（成阵/破阵）与将领也要进快照，否则薄雾区的部队会"凭空成阵""凭空多出一个将"。
         // 67：**队形名（formKey）不进快照**——那是表现层的派生量，由 troop.js 自己记住；
         //   情报出口只该带情报，不该顺手带上"这一簇画成什么形状"。
         formation: u.formation,
+        // 112+：阵型排不排得下也要进快照——否则薄雾区的部队会"凭空排整齐"或"凭空排不下"，
+        //   与 ㊵ 把 formation 塞进快照是同一个理由（情报出口不许比快照更聪明）。
+        formFirm: u.formFirm, formFitWhy: u.formFitWhy,
         leaderAlive: !!(u.leader && u.leader.alive), leaderKind: u.leader ? u.leader.kind : null,
         advancing: u.goal ? u.goal.dir : null, stop: u.lastStopReason || null,
         contact: u.contact ? { id: u.contact.id, x: u.contact.x, y: u.contact.y, t: u.contact.t } : null
@@ -992,8 +1017,9 @@
       id: u.id, name: u.name, team: u.team, type: u.type, x: u.x, y: u.y,
       hp: u.hp, maxHp: u.maxHp, morale: u.morale, stamina: u.stamina,
       state: u.state, stance: u.stance, alert: u.alert, isRouted: !!u.isRouted,
-      guard: u.guard, pathLen: u.path.length, reactTimer: u.reactTimer,
+      guard: u.guard, pathLen: u.path.length, meet: u.meet,
       formation: u.formation, leader: u.leader,
+      formFirm: u.formFirm, formFitWhy: u.formFitWhy,
       // 101：加速行军是**看得见的状态**（否则玩家不知道档位还开着，等于单向门）
       forced: !!u.forced,
       advancing: u.goal ? u.goal.dir : null, stop: u.lastStopReason || null,
@@ -1087,20 +1113,36 @@
       //   107 的教训（朝向只能有一个账本）在这里同样成立。**只写不读**，不影响任何判定。
       spd:0,
       isRouted:false,state:'待命',order:null,hold:null,lastHitBy:null,thinkTimer:0,
+      // 2026-11-23：**我最近打的是谁**（区别于 targetId＝我被下令打谁）。
+      //   围攻判定只能读这个：MOVE / 扫荡前进接敌时 targetId 是 null，
+      //   拿 targetId 当判据会变成「只有下过进攻令的人才算包夹」，而玩家最常用的
+      //   推进方式恰恰不下令 ⇒ 玩家侧打出来的包围一条都数不到。
+      hitTarget:null,hitTargetAt:-1,
       // 78：压制（伏着不主动接敌）与"在等什么"（面板要看得见）。两者都是**部队上的状态**，
       //   不是队列的内部变量——副将汇报、面板、测试读的都是部队，不是队列。
       holdFire:null,armed:null,lastHitAt:-1,
-      alert:'UNAWARE',alertTimer:0,reactTimer:0,panicTimer:0,contact:null,
-      ambushSeverity:0,ambushCd:0,
-      // 2026-11-13：交战状态与"报不了警"。两者都是**部队上的状态**（83 的规矩：新字段必须
-      //   显式列进这里，否则 Object.assign 不会补，读到的全是 undefined）。
-      //   lastFightAt＝最近一次交火结算的时刻（攻守双方都盖章）；warnBlock＝还剩多少秒报不了警。
-      lastFightAt:-1,warnBlock:0,
-      // 109：`stance` 是**唯一开关**，取值 LOOSE（散阵）/ FORMED（列阵）。旧值 MARCH/GUARDED 已退役。
-      guard:0,guardHold:0,guardFloor:0,stance:'LOOSE',stamina:STAMINA.MAX,
+      // 2026-11-23：遇敌状态是**一次性判定的结果**，不是每帧算出来的投影。
+      //   meet      = null | '已发现' | '有预期' | '未预期'，只由 setMeet 写一次
+      //   meetAt    = 定档时刻（调试与播报用）
+      //   contact   = 最后看见/挨打的位置（AI 查证用，玩家面板也读）
+      //   contactAt = 最后一条真实敌情的时刻（脱敌计时的起点）
+      //   alert     = 'ALERT' / 'UNAWARE'，只剩"此刻看不看得见"
+      // 旧字段全删：reactTimer/panicTimer（反应延迟）、ambushSeverity/ambushCd（突袭加成）、
+      //   warnBlock（通报封锁）、alertTimer（6 秒已目视保持）、guardHold/guardFloor（戒备地板）。
+      alert:'UNAWARE',contact:null,contactAt:-1,meet:null,meetAt:-1,
+      lastFightAt:-1,
+      // 109：`stance` 是**唯一开关**，取值 LOOSE（未列阵）/ FORMED（列阵）。
+      //   2026-11-23 起它同时就是"戒备／战斗准备"，三者是一件事。
+      // `guard` 降级为派生量（0/1，只有 syncFormation 写），保留是为了面板与 AI 少改。
+      guard:0,stance:'LOOSE',stamina:STAMINA.MAX,
       // 109：`formation`/`formationWhy` 是**派生量**（由 stance 推出），只有 syncFormation 写。
-      //   开局没开戒备，所以是散阵。
-      formation:'BROKEN',formationWhy:'散阵',leader:null,
+      //   开局没开戒备，所以是未列阵。
+      formation:'BROKEN',formationWhy:'未列阵',leader:null,
+      // 112+：阵型排得下吗（二值）。`formFirm` 是**落位判定的结果**，只由 judgeFormFit 写；
+      //   `fitKey`/`fitDir` 记"上次判的时候的队形档与八向朝向"，用来决定要不要重判；
+      //   `formFitWhy` 只给面板与探针看（'terrain:x,y' ＝ 地形挡着，'ally:x,y' ＝ 友军挤着）。
+      //   未列阵时恒 true：没有阵型要破，增益本来就只挂在列阵上。
+      formFirm:true,formFitWhy:'',fitKey:null,fitDir:null,
       // 97：活捉开关与"这支部队是被俘下场"的标记。两者都是**部队上的状态**，
       //   不是命令层的变量——播报、结局、测试读的都是部队。
       captureMode:false,captured:false,
@@ -1290,6 +1332,52 @@
     for(const id of s)if(!except||id!==except.id)n++;
     return n;
   }
+  // ── 112+：阵型"排不排得下"（二值、落位时判一次、不进 A*）──────────────────
+  // 分工：**哪几格算"正面那一行"**是几何，归 e1（`TROOP.formFits`）；
+  //   **那几格被谁的身体占着**只有 d 层知道（`footprintOcc`），所以从 `allyBodyOn` 递进去。
+  //   这样 e1 仍然只算几何、不认识部队，d 层也不重复一份模板坐标。
+  //
+  // 为什么只认**同队**身体：
+  //   敌军踩在你前排的格上不算"排不下"，那是接战本身。真算进去，一进肉搏人人打折——
+  //   而打赢肉搏的恰恰是阵型该起作用的时候，这条会反向惩罚正确打法。
+  //
+  // 为什么触发点是"d 层站定"而不是 e1 的 `far<=SETTLE`：
+  //   后者是**动画时钟**（每帧真实 dt），读它等于把帧率接进数值：60fps 与 20fps 会在
+  //   不同时刻判出不同结果，`?seed=` 当场失效。d 层判"站定"只看 `u.path` 空。
+  //
+  // 为什么朝向变了要重判：
+  //   前排是哪几格由**八向朝向**决定，而朝向的唯一账本是 `u.turn`。停步之后部队还会转身
+  //   面向战场（0.6 秒），八向跨过去前排就换了一排——不重判就是拿旧朝向的结果当事实。
+  //   一次转身最多判 8 次，每次 3~5 次 walkable，可以忽略。
+  //
+  // 为什么"停下之后友军挪开"不重判：
+  //   数值不能因为旁边有人路过就变。要重判，得重新落位（再走再停、换阵、转身）。
+  function allyBodyOn(x,y,self){
+    const s=footprintOcc.get(key(x,y));
+    if(!s||!s.size)return false;
+    for(const id of s){
+      if(id===self.id)continue;
+      for(const o of allUnits)if(o.id===id&&o.hp>0&&o.team===self.team)return true;
+    }
+    return false;
+  }
+  function judgeFormFit(u){
+    if(!u||u.hp<=0)return false;
+    // 还在走：上一份判定作废。等站定那一步按新位置重新判。
+    if(u.path.length){u.fitKey=null;u.fitDir=null;return false;}
+    const T=(typeof TROOP!=='undefined')?TROOP:null;
+    if(!T||!T.formFits||!T.pickFormation||!T.dir8Of)return false;   // e1 未加载：不判
+    const formKey=T.pickFormation(u);
+    const dir=T.dir8Of(Number.isFinite(u.turn)?u.turn:0);
+    const dk=dir[0].toFixed(3)+','+dir[1].toFixed(3);
+    if(u.fitKey===formKey&&u.fitDir===dk)return false;   // 站定后阵型档与朝向都没变 → 不重判
+    u.fitKey=formKey;u.fitDir=dk;
+    const r=T.formFits(u,(x,y)=>allyBodyOn(x,y,u),dir);
+    const before=u.formFirm;
+    u.formFirm=r.firm;
+    u.formFitWhy=r.firm?'':(r.bad[0]?(r.bad[0].why+':'+r.bad[0].x+','+r.bad[0].y):'');
+    return before!==u.formFirm;      // 只在"结论变了"时告诉调用方（不然每步都算"有变化"）
+  }
   // 98（Q29）：落点分配改判「整块 footprint 都空」，不是"锚点格真没人"。
   //   离线桩（还没跑过 step、表为空）退回旧的 cellFree，免得第一次 collectSlots 凭空放行。
   //   ⚠️ 不拿 `footprintOcc` 里"别的友军**当前** footprint 覆盖"当拒绝理由：那些友军自己也要动，
@@ -1416,13 +1504,14 @@
   }
   // ── 地形对视野的修正：只有这一处 ────────────────────────────
   // 注意这里**有两个视距**，历史上就是分开的，别合并：
-  //   · visionRadius = 判定视距（能不能看见/打不打得到），所有单位一律 DETECT+戒备 起
+  //   · visionRadius = 判定视距（能不能看见/打不打得到），所有单位一律 DETECT 起
   //   · fogRadius    = 迷雾显示半径（画面上照亮多少），友军只有 FOG.friendlyRadius 的小圈
   // 合并过一次（2026-10-28 ㊸ 第一版），后果是敌军 sightFor 从 8 掉到 5，
   //   aware_test [7] 立刻红：敌骑兵亲眼看见却判成"未预期"。两者只共享地形修正。
   // 地形的两条修正：
   //   视点 = **加**（高地 +4.5、洼地 −1.5），不平移弧向系数——站高地上是整体看得远；
   //   林冠 = **乘**（×0.55），钻林子里是整体缩一圈，不是只有正前方变短。
+  // **2026-11-23：这里不再有 `+ GUARD.VISION * u.guard`。** 戒备不加视野，视野只剩地形一个变量。
   function terrainSight(base, u) {
     let r = base + SIGHT.HILL * eyeHeight(u);
     if (tileOf(u) === 'forest') r *= SIGHT.IN_FOREST;
@@ -1430,22 +1519,22 @@
   }
   function visionRadius(u) {
     if (!u || u.hp <= 0) return 0;
-    return terrainSight(DETECT + GUARD.VISION * u.guard, u);
+    return terrainSight(DETECT, u);
   }
   function fogRadius(u) {
     if (!u || u.hp <= 0) return 0;
-    const base = (u === commander) ? DETECT + GUARD.VISION * u.guard : FOG.friendlyRadius;
+    const base = (u === commander) ? DETECT : FOG.friendlyRadius;
     return terrainSight(base, u);
   }
   // 视野不是全向等距：正面最远，侧面打折，背后几乎看不见；林中目标藏得更深。
-  // 戒备会把正面和侧面放远，但**背面永远不动**——这是"绕后克制戒备"的几何根。
+  // **背面永远 0.4，不随任何东西变**——这是"绕后克制"的几何根。
   // 地形加成全部在 visionRadius 里，这里是"朝哪看"的系数，两者不混。
   function sightFor(u,o){
     // 藏在林中的目标只认 3 格：这条压过任何地形加成，因为"林子藏人"是绝对的
     const base=(tileOf(o)==='forest'?AWARE.FOREST_SIGHT:visionRadius(u));
     const arc=attackArc(u,o);
     if(arc==='正面')return base;
-    if(arc==='侧面')return base*(AWARE.SIDE_SIGHT+GUARD.SIDE*u.guard);
+    if(arc==='侧面')return base*AWARE.SIDE_SIGHT;
     return base*AWARE.BACK_SIGHT;
   }
   // ── 98：草丛式埋伏（Q4a / Q5 / Q15）───────────────────────────────
@@ -1484,63 +1573,40 @@
     if(d>sightFor(u,o))return false;
     return d<=losCap(Math.round(u.x),Math.round(u.y),Math.round(o.x),Math.round(o.y));
   }
+  // 遇敌三档的名字。**只有一个来源**：定档时写下的 `u.meet`。
+  //   已发现＝看见时距离 > MEET_RANGE；有预期＝≤MEET_RANGE 且当时开着戒备；未预期＝≤MEET_RANGE 且关着。
+  // 没接触过任何敌人时是 null，面板显示"未接敌"。
   function alertWord(u){
-    if(u.reactTimer>0)return '措手不及';
-    if(u.alert==='ALERT')return '已目视';
-    if(u.alert==='SUSPECT')return '有预期';
-    return '未预期';
+    if(!u)return '未接敌';
+    return u.meet || '未接敌';
   }
-  // 遭遇严重度，全程只有这一条公式。原来"按 alert 分档 + 死角再补一刀"是两套，
-  // 谁覆盖谁说不清；现在统一成：看得见打你的人＝0，看不见则由戒备决定 1 → 0.4。
-  function surpriseSeverity(u){return Math.max(0,Math.min(1,1-GUARD.SEVERITY*u.guard));}
-  function contactSeverity(u,aggressor){return canSee(u,aggressor)?0:surpriseSeverity(u);}
-  // 精力见底时反应更慢——疲惫的部队挨打更惨
-  function reactScale(u){return u.stamina<STAMINA.TIRED?STAMINA.TIRED_REACT:1;}
-  // 进入接战状态。severity＝这次撞上有多突然（0 到 1 连续）：
-  // 1＝毫无预警、0.4＝戒备充分仍被贴到近前（仓促）、0＝早就看见了
-  // 认知三档（2026-11-13 拍板）：判据只看"进入接战距离那一刻"知道了多少，
-  //   与界面上的三档词一一对应，不给第四种。
-  //   已目视＝此前在接战距离之外就看见了；有预期＝没看见但有预警；未预期＝什么都没有。
-  function meetLevel(u){
-    if(u.alert==='ALERT')return '已目视';
-    if(u.guard>=GUARD.SHOW)return '有预期';
-    return '未预期';
+  // 定档：只在第一次看见那一刻判一次。**读的是"看见之前"的 stance**——
+  //   先自动开戒备再定档，所有人都会变成"有预期"。109 在这里撞过一次，写反了不报错、只出错。
+  function decideMeet(u,dist){
+    if(dist>AWARE.MEET_RANGE)return '已发现';
+    return u.stance==='FORMED'?'有预期':'未预期';
   }
-  const MEET_MORALE={'已目视':MORALE.MEET_SEEN,'有预期':MORALE.MEET_EXPECT,'未预期':MORALE.MEET_BLIND};
-  function meetShock(u){const level=meetLevel(u);return {level,morale:MEET_MORALE[level]};}
-  function firstContact(u,foe,severity){
-    // 先判定再改 alert：改完就分不出"早就看见"和"刚刚撞上"了（这是本轮最容易写反的一行）。
-    const meet=meetShock(u);
-    u.alert='ALERT';u.alertTimer=AWARE.HOLD;
-    if(severity<=0)return;   // 早就看见了，摆好阵等着，什么都不用发生
-    const delay=(AWARE.REACT[u.type]||1.5)*severity*reactScale(u);
-    u.reactTimer=delay;u.panicTimer=AWARE.PANIC*severity;u.ambushSeverity=severity;
-    if(meet.morale!==0)changeMorale(u,meet.morale);
-    // 毫无预警的部队被打懵了：措手不及这段时间里来不及向友军通报（2026-11-13 拍板）。
-    //   用 delay 当封锁时长，不另开一个数——"还在发懵"和"报不了警"是同一段时间。
-    if(meet.level==='未预期')u.warnBlock=Math.max(u.warnBlock,delay);
+  const MEET_MORALE={'已发现':MORALE.MEET_SEEN,'有预期':MORALE.MEET_EXPECT,'未预期':MORALE.MEET_BLIND};
+  function setMeet(u,level,foe){
+    u.meet=level;u.meetAt=simTime;
+    const m=MEET_MORALE[level];
+    if(m)changeMorale(u,m);
     if(u.team==='blue'){
-      logEvent(meet.level==='未预期'
-        ? `${u.name}未预期遭遇${foe.name}！毫无预警被贴到近前，${delay.toFixed(1)} 秒内无法还击，也来不及通报。`
-        : `${u.name}虽有戒备仍被${foe.name}贴到近前，仓促应战——但没被打懵。`);
-    } else {
-      logEvent(meet.level==='未预期'?`${foe.name}突袭得手，${u.name}阵脚大乱！`:`${foe.name}抢先咬住${u.name}，但对面已有戒备。`);
+      logEvent(level==='未预期'
+        ? `${u.name}未预期遭遇${foe.name}！戒备未开就被贴到 ${AWARE.MEET_RANGE} 格内，阵脚大乱（士气 ${m}）。`
+        : level==='有预期'
+          ? `${u.name}在 ${AWARE.MEET_RANGE} 格内撞上${foe.name}，虽有戒备，仍属仓促（士气 ${m}）。`
+          : `${u.name}在远距离发现${foe.name}，从容列阵。`);
     }
   }
-  // 认知更新：亲眼看见＝已目视（知+备）；只听说/只听见＝有预期（只有备）；都没有＝未预期。
-  // 状态不用状态机硬跳，全部由 guard 算出来，所以"情报过期"和"戒备消退"是同一条曲线。
+  // 遇敌状态的唯一推进入口。每步两次判断，没有状态机：
+  //   ① 此刻看得见敌人 → 没定过档就定档；刷新 contact 与"最后接触时刻"
+  //   ② 看不见 → 脱敌计时；满 `AWARE.HOLD` 秒清档并**自动关戒备**
+  // `alert` 只剩两个值（ALERT/UNAWARE），单纯表示"此刻看不看得见"，不再承载三档。
+  //   （旧版 alert 每帧重算三档，敌人一退出视野就掉档，正是 109 两个死锁的根。）
   function updateAwareness(u,dt){
     if(u.hp<=0)return false;
     let dirty=false;
-    if(u.reactTimer>0){
-      u.reactTimer=Math.max(0,u.reactTimer-dt);
-      if(u.reactTimer===0)u.ambushSeverity=0;   // 缓过来了，之后挨打不再算突袭
-      dirty=true;
-    }
-    if(u.panicTimer>0){u.panicTimer=Math.max(0,u.panicTimer-dt);dirty=true;}
-    if(u.ambushCd>0){u.ambushCd=Math.max(0,u.ambushCd-dt);dirty=true;}
-    if(u.warnBlock>0){u.warnBlock=Math.max(0,u.warnBlock-dt);dirty=true;}
-    // ① 先看自己看见了什么
     let nearest=null,best=Infinity;
     for(const o of allUnits){
       if(!canSee(u,o))continue;
@@ -1548,60 +1614,20 @@
       if(d<best){best=d;nearest=o;}
     }
     if(nearest){
-      // 贴身之前有多突然，用"看见这一眼之前"的戒备算，不能用看见之后的值
-      if(best<=AWARE.CLOSE&&u.alert!=='ALERT'){
-        const severity=surpriseSeverity(u);
-        if(severity>0)firstContact(u,nearest,severity);
-      }
+      // ⚠️ 顺序：先定档（读的是**定档之前**的 stance），再写 contact。
+      if(u.meet===null)setMeet(u,decideMeet(u,best),nearest);
       u.contact={id:nearest.id,x:nearest.x,y:nearest.y,t:simTime};
-      u.alert='ALERT';u.alertTimer=AWARE.HOLD;
-      // 亲眼看见是最强的戒备来源；同时留一段下限，避免一转身就把戒备清零
-      u.guard=1;u.guardHold=AWARE.HOLD;u.guardFloor=GUARD.VIS_HOLD;
-      return true;
+      u.contactAt=simTime;
+      u.alert='ALERT';
+      return true;            // 看见时每步都算变化：位置在动，快照与面板都要跟
     }
-    // ② 没看见：先掉"已目视"，再按戒备值决定还算不算"有预期"
-    if(u.alert==='ALERT'){
-      u.alertTimer-=dt;
-      if(u.alertTimer<=0){
-        u.alert='SUSPECT';   // 位置留着，当作"最后目击点"，有预期才有的可查
-        if(u.team==='blue'&&u.contact)logEvent(`${u.name}失去接触，转入有预期，向最后目击点警戒。`);
-      }
+    if(u.alert!=='UNAWARE'){u.alert='UNAWARE';dirty=true;}
+    // 脱敌：`contactAt` 是最后一条**真实敌情**（看见、或被挨打）的时刻。
+    //   挨打也算接触，否则在林子里挨射会莫名其妙"脱敌清零"、下一箭又重判一次。
+    if(u.meet!==null&&simTime-u.contactAt>AWARE.HOLD){
+      u.meet=null;u.contact=null;
+      if(u.stance==='FORMED'&&!u.isRouted)u.stance='LOOSE';   // 敌情过期 → 自动关戒备
       dirty=true;
-    }
-    if(u.alert!=='ALERT'){
-      if(u.guard>=GUARD.SHOW)u.alert='SUSPECT';
-      else {u.alert='UNAWARE';u.contact=null;}
-    }
-    return dirty;
-  }
-  // 情报通报：看见敌人的部队把方位传给身边友军，收到的一方戒备抬起来。
-  // 双方同一套规则——这也是玩家能被敌人提前发现的原因。
-  let warnAcc=0;
-  function propagateWarnings(dt){
-    warnAcc+=dt;
-    if(warnAcc<AWARE.WARN_LAG)return false;
-    warnAcc=0;
-    let dirty=false;
-    for(const reporter of allUnits){
-      if(reporter.hp<=0||reporter.alert!=='ALERT'||!reporter.contact)continue;
-      // 2026-11-13：未预期遭遇的部队在措手不及期间报不了警（见 firstContact）。
-      //   这一条和"未预期扣更多士气"是同一件事的两面：既没准备好，也没法喊人。
-      if(reporter.warnBlock>0)continue;
-      const spot=reporter.contact;
-      for(const ally of allUnits){
-        if(ally===reporter||ally.team!==reporter.team||ally.hp<=0)continue;
-        if(ally.alert==='ALERT')continue;          // 自己已经看见了，用不着通报
-        if(distance(reporter,ally)>AWARE.WARN_RADIUS)continue;
-        // 就算收到通报，自己眼下能看见的仍按亲眼看见算
-        if(allUnits.some(o=>o.hp>0&&o.team!==ally.team&&canSee(ally,o)))continue;
-        ally.contact={id:spot.id,x:spot.x,y:spot.y,t:spot.t};
-        // 通报抬高的是"戒备"，不是"位置精度"：只知道大致方向，还是要自己查
-        if(ally.guard<GUARD.WARN)ally.guard=GUARD.WARN;
-        if(ally.alert!=='SUSPECT'){
-          ally.alert='SUSPECT';dirty=true;
-          if(ally.team==='blue')logEvent(`${reporter.name}通报敌情，${ally.name}转入有预期。`);
-        }
-      }
     }
     return dirty;
   }
@@ -1638,7 +1664,7 @@
   function moraleWord(m){return m>=75?'高昂':m>=50?'稳定':m>=30?'动摇':'濒溃';}
   function startRout(unit){
     if(unit.hp<=0||unit.isRouted)return;unit.isRouted=true;unit.targetId=null;unit.attackTimer=0;unit.order=null;unit.goal=null;unit.state='溃退';   // 103：不写坐标，位置留在原处
-    unit.stance='LOOSE';   // 109：溃退强制散阵（优先级最高），精力开始回复
+    unit.stance='LOOSE';   // 109：溃退强制未列阵（优先级最高），精力开始回复
     const path=findSafePath(unit);unit.path=path||[];
     // 一支部队溃退会带崩身边友军；这里直接扣减，避免连锁递归无限展开
     // 友军溃退的打击：比"被击破"轻——兵还在、能重整回来，只是这一阵不能打了
@@ -1657,11 +1683,36 @@
     if(unit.isRouted){if(unit.morale>=MORALE.RALLY_AT)rallyUnit(unit);return;}
     if(unit.morale<=MORALE.ROUT_AT)startRout(unit);
   }
+  // 伤害系数（士气唯一的战力出口）：0.55（崩溃）→ 1.15（满士气）。
+  //   **全库只有这一个口径**——attack() 与 ui 面板都从这里取。两处各写一遍公式，
+  //   改一个数就会有一处说谎（112 之前 ui 里就硬编着 0.7+0.45×m/100）。
+  function zealOf(m){
+    const t=Math.max(0,Math.min(100,m==null?70:m));
+    return MORALE.ZEAL_LO+(MORALE.ZEAL_HI-MORALE.ZEAL_LO)*(t/100);
+  }
+  // 友军被击破的扣点：按「本方还剩几支」折算（口径见 MORALE.BREAK_* 注释）。
+  //   team 是**被打垮那一方**；那支部队此刻 hp 已归零，所以「死前支数」＝现存 +1。
+  //   用本方**编制总数**做满编基准（不是硬编 8），`perSide` 配置变小以后仍成立。
+  function 被击破扣点(team){
+    const full=team==='blue'?units.length:enemies.length;
+    let left=0;
+    for(const x of allUnits)if(x.team===team&&x.hp>0)left++;
+    const before=left+1;
+    const raw=MORALE.BREAK_BASE*full/Math.max(1,before);
+    return Math.min(MORALE.BREAK_MAX,Math.round(raw));
+  }
   // 统计正对着某目标开火的方向数，用来判断是否被多面围攻
+  // 「几面在打我」＝**最近 3 秒内真的打中过我**的敌人分布在几个象限。
+  //   判据不用 `targetId`（那是"被下令打谁"）：MOVE / 扫荡前进接敌时 targetId 是 null，
+  //   用它会得出「只有下过进攻令的人才算包夹」，而玩家最常用的推进方式恰恰不下令。
+  //   ⚠️ 别拿「基线里溃退总是只有蓝方」当这条的论据——两边都换过判据之后
+  //   蓝 14 / 红 0 照旧，真因是 c′ 的 `huntCommander`（AI 专门三面包我方主将），
+  //   而我方是平铺推进、没有人被三面包。判据这条只解决"算不算得出来"，不解决"谁被围"。
   function surroundDirections(target){
     const dirs=new Set();
     for(const o of allUnits){
-      if(o.hp<=0||o===target||o.team===target.team||o.targetId!==target.id)continue;
+      if(o.hp<=0||o===target||o.team===target.team)continue;
+      if(o.hitTarget!==target.id||simTime-o.hitTargetAt>MORALE.ENGAGE_MEMORY)continue;
       if(distance(o,target)>o.range+.5+REACH2)continue;
       const a=Math.atan2(o.y-target.y,o.x-target.x);
       dirs.add(Math.min(3,Math.floor((a+Math.PI)/(Math.PI/2))));
@@ -1737,11 +1788,11 @@
       u.rush=!!on;
       u.rushTarget=on?(target||null):null;
       if(on){
-        // 109：**不再破阵**。全力冲锋是"战斗档里的一种特殊形态"（RUSH），不是散阵——
+        // 109：**不再破阵**。全力冲锋是"战斗档里的一种特殊形态"（RUSH），不是未列阵——
         //   上司的口径是"进入战斗后、向敌军移动/进攻时也保持战斗队形"，而 98 那条
         //   「冲锋即破阵」与它正相反。冲锋的代价只剩体力（4/秒）：
         //   FORMATION.BONUS 本来恒 1.0，破阵当时只是个标签，删掉不减任何战力。
-        // 109：冲锋同时**转入列阵**。否则"散阵＋冲锋"这条命令没有任何画面
+        // 109：冲锋同时**转入列阵**。否则"未列阵＋冲锋"这条命令没有任何画面
         //   （pickFormation 先看开关），而冲锋本来就是战斗行为——
         //   与"看见敌人自动开戒备"同性质，不是替玩家做决定。
         u.stance='FORMED';
@@ -1749,7 +1800,7 @@
       }
     }
     if(!silent)toast(on
-      ? `${live.length} 支部队改为全力冲锋：速度 +50%、起手提气，代价是体力 4/秒与阵型散开，接战即收。`
+      ? `${live.length} 支部队改为全力冲锋：速度 +50%、起手提气，代价是体力 4/秒，接战即收。`
       : `${live.length} 支部队收起冲锋，回正常阵型。`);
     return {n:live.length};
   }
@@ -1819,7 +1870,10 @@
         advancing:v.advancing||null,
         lastStopReason:v.stop||null,
         hp:v.hp,maxHp:v.maxHp,morale:Math.round(v.morale),
-        stamina:Math.round(v.stamina),stance:v.stance,alert:v.alert,
+        stamina:Math.round(v.stamina),stance:v.stance,alert:v.alert,meet:v.meet||null,
+        // 112+：阵型排得下吗（二值）。读数取自**快照**，与面板同一份——
+        //   薄雾区的部队读旧值，不会因为玩家换了个镜头就变。
+        formFirm:v.formFirm!==false,formFitWhy:v.formFitWhy||'',
         forced:!!v.forced,
         x:Math.round(v.x),y:Math.round(v.y),
         stale:v.stale||0
@@ -2392,7 +2446,7 @@
   //   enemyInRange  射程内最近的一支（弓箭：射程 5 格）
   //   enemyNear     某点附近最近的一支（"冲锋"不点名时打眼前这一支）
   // 都只判距离、不看认知档位：这是**下令那一刻的判断**，不是结算——
-  //   至于打不打得着、对方有没有准备，仍旧归 attack()/contactSeverity 那一套。
+  //   至于打不打得着、对方有没有准备，仍旧归 attack() 与遇敌档那一套。
   function enemyInRange(list,known){
     const live=list.filter(u=>u&&u.hp>0&&!u.isRouted);
     let best=null;
@@ -2437,31 +2491,34 @@
   }
   // 戒备/常行/停止/群体撤退：执行 + 播报一体，返回计数供命令日志归类
   // 109：**这是唯一的阵型命令**。"转入戒备"＝保持战斗队形（走起来自动转行军、停下来自动转战斗），
-  //   "转为常行"＝散阵。"列阵/结阵/布阵"这些词在 b 层归到这一条（见 understand.js）。
+  //   "转为常行"＝未列阵。"列阵/结阵/布阵"这些词在 b 层归到这一条（见 understand.js）。
   function stanceUnitsOn(list){
     const live=list.filter(u=>u.hp>0&&!u.isRouted);
-    let ok=0,tired=0;
+    let ok=0,tired=0,locked=0;
     for(const u of live){
       if(u.stance==='FORMED'){ok++;continue;}
+      // 2026-11-23：**未预期遇敌的部队开不了**。整场遭遇都不能列阵，这是埋伏真正的惩罚；
+      //   `updateStanceAuto` 下一步也会把它按回去，所以这里直接拒，不做一个点了没反应的假按钮。
+      if(u.meet==='未预期'){locked++;continue;}
       if(u.stamina<STAMINA.REARM){tired++;continue;}
       u.stance='FORMED';ok++;
     }
-    toast(`${ok} 支部队转入列阵：保持战斗队形，正面视野 ${DETECT} → ${DETECT+GUARD.VISION} 格、遇敌不再发懵；代价是速度 ×0.8、精力行军 ${STAMINA.GUARD.move}/秒${tired?`。${tired} 支精力低于 ${STAMINA.REARM}，撑不起阵型`:''}。`);
-    return {ok,tired};
+    toast(`${ok} 支部队转入列阵：保持战斗队形，遇敌不再措手不及；代价是速度 ×0.8、精力行军 ${STAMINA.GUARD.move}/秒${tired?`。${tired} 支精力低于 ${STAMINA.REARM}，撑不起阵型`:''}${locked?`。${locked} 支已陷未预期遭遇，来不及列阵`:''}。`);
+    return {ok,tired,locked};
   }
   function stanceUnitsOff(list){
     const live=list.filter(u=>u.hp>0&&!u.isRouted);
     let n=0,seen=0;
     for(const u of live){
       if(u.stance!=='FORMED')continue;
-      // 109：**已目视敌军的部队关不掉**——`updateStanceAuto` 下一步就会把它开回去，
-      //   让它"关成功"就是个点了没反应的假按钮（UI 那边也置灰，同一句话）。
-      if(u.alert==='ALERT'){seen++;continue;}
+      // 已发现：自动列阵，且这一步之后 `updateStanceAuto` 会再开回来——不许关
+      //   （109 定、2026-11-23 保留）。有预期是唯一玩家能自己关的档。
+      if(u.meet==='已发现'){seen++;continue;}
       u.stance='LOOSE';n++;
     }
     toast(seen
-      ? `${seen} 支部队已目视敌军，散不得阵${n?`；另 ${n} 支转入散阵`:''}。要收队先脱离接触。`
-      : (n?`${n} 支部队转入散阵，精力开始回升。`:'没有部队处于列阵状态。'));
+      ? `${seen} 支部队已发现敌军，这一波不能收队${n?`；另 ${n} 支转入未列阵`:''}。要收队先脱离接触。`
+      : (n?`${n} 支部队转入未列阵，精力开始回升。`:'没有部队处于列阵状态。'));
     return {n,seen};
   }
   function stopUnits(list){
@@ -2559,59 +2616,45 @@
   function attack(attacker,target){
     const arc=attackArc(target,attacker),arcMultiplier=arc==='正面'?.75:arc==='侧面'?1.25:1.5;
     const counter=counterMultiplier(attacker,target);
-    // 士气决定输出：高昂时打得狠，临近崩溃时打不动
-    const zeal=.7+MORALE.BONUS*(attacker.morale/100);
-    // 突袭按"挨打那一刻看不看得见打人的"来判，而不是"历史上有没有见过"。
-    // 被摸到背后、被射程外的人偷袭，都算没反应过来——这样绕后才有实际收益。
-    const severity=contactSeverity(target,attacker);
-    if(severity>0&&target.reactTimer<=0&&target.ambushCd<=0){
-      const delay=(AWARE.REACT[target.type]||1.5)*severity*reactScale(target);
-      target.reactTimer=delay;
-      target.panicTimer=Math.max(target.panicTimer,AWARE.PANIC*severity);
-      target.ambushSeverity=severity;   // 由戒备决定：1＝全无准备，0.4＝戒备充分
-      target.ambushCd=AWARE.SURPRISE_CD;
-      // 2026-11-13：这里不再扣士气。死角挨打的惩罚是"1~2.5 秒不能还手"和"伤害 ×1.2~1.5"，
-      //   已经够重；再扣一次士气就是同一件事的第三处表达（伏击的士气冲击已在 firstContact 统一）。
-      logEvent(target.team==='blue'
-        ? `${target.name}遭到来自死角的攻击（戒备 ${Math.round(target.guard*100)}%），一时找不到对手方位！`
-        : `${attacker.name}从死角袭击${target.name}。`);
-    }
-    // 加成跟着"这次撞上有多突然"走：全突袭 ×1.5，戒备充分 ×1.2，正面迎击 ×1
-    const ambush=target.reactTimer>0?1+(AWARE.AMBUSH_DMG-1)*target.ambushSeverity:1;
-    let damage=Math.round(attacker.damage*arcMultiplier*counter*zeal*ambush);
+    // 士气决定输出：高昂时打得狠，临近崩溃时打不动（曲线只在 zealOf 一处，见下）
+    const zeal=zealOf(attacker.morale);
+    // **2026-11-23：遇敌状态不再影响伤害。** 它的唯一通道是士气，在定档那一次扣（见 setMeet）。
+    //   删掉的是：`surpriseSeverity`/`contactSeverity` 两套判据、反应延迟（reactTimer）、
+    //   突袭伤害倍数（AMBUSH_DMG）、死角重复触发（SURPRISE_CD）。
+    // 但"被人从看不见的地方打"仍然要**定一次档**——这是"未预期"的第二个入口
+    //   （第一个是看见时的距离）。只在这一种情形下写：此前从没定过档、且此刻看不见打你的人。
+    //   已经定过档的不再改（"只判一次"），这是这套简化必然丢掉的：发现了别人之后
+    //   再被背后捅一刀，不再有任何加成，只有弧向 ×1.5（那是方位机制，不属于遇敌状态）。
+    if(target.meet===null&&!canSee(target,attacker))setMeet(target,'未预期',attacker);
+    let damage=Math.round(attacker.damage*arcMultiplier*counter*zeal);
     // 第六条改判：残兵自动减伤。曲线未定时减伤恒 0，这个分支整局不进，一刀都不改。
     //   放在封顶之前，探针记录的「封顶前理论值」口径不变。
     const 残兵减伤=残兵减伤比例(target);
     if(残兵减伤>0)damage=Math.round(damage*(1-残兵减伤));
-    // 叠乘封顶：突袭 × 背面 × 克制能到 3 倍以上，不封顶就会一击秒杀，士气系统直接架空
+    // 单次伤害封顶：背面 × 克制 × 迂回能到 3 倍以上，不封顶就会一击秒杀，士气系统直接架空
     damage=Math.max(1,Math.min(damage,Math.round(target.maxHp*AWARE.MAX_HIT)));
     扣减兵力(target,damage);attacker.attackTimer=attacker.cooldown;target.lastHitBy=attacker.id;
     // 78：挨了这一下＝知道有人要杀你，伏击的"不动"到此为止（不还手会被打死，那不是军令是事故）。
     target.lastHitAt=simTime;
     if(target.holdFire)exposed(target,'被攻击');
-    // 挨了这一下，再迟钝也知道有人在打，并且记住方位（突袭只赚第一下）
-    target.alert='ALERT';target.alertTimer=AWARE.HOLD;
+    // 挨了这一下就记住了方位。**只写 contact/contactAt，不动 alert、不抬戒备**——
+    //   2026-11-23 删掉了"挨打抬戒备"与"枪声广播"：戒备是玩家的开关，不接受外部设定。
+    //   contactAt 重置是必须的：否则在林子里挨射会"脱敌清零"，下一箭又重新定一次档。
     target.contact={id:attacker.id,x:attacker.x,y:attacker.y,t:simTime};
-    // 中弹本身就是最强的戒备来源之一：往后 4 秒不会被同一招连着打懵
-    if(target.guard<GUARD.HIT_FLOOR)target.guard=GUARD.HIT_FLOOR;
-    target.guardHold=Math.max(target.guardHold,GUARD.HIT_TIME);
-    if(target.guardFloor<GUARD.HIT_FLOOR)target.guardFloor=GUARD.HIT_FLOOR;
-    // 枪声会传出去：附近部队听见交战，戒备抬起来（免费，会自己淡出）
-    for(const w of allUnits){
-      if(w===attacker||w===target||w.hp<=0)continue;
-      if(distance(w,target)>GUARD.SOUND_RADIUS)continue;
-      if(w.guard<GUARD.SOUND)w.guard=GUARD.SOUND;
-    }
+    target.contactAt=simTime;
     // 围攻（109 改动）：**这里不再破阵**。弧向/包夹本来就在伤害里算过（0.75/1.25/1.5），
     //   98 那条「被包夹 → breakFormation」随"阵型账本合并"一起删：109 的模型里
-    //   "散阵"只由"关戒备"一个入口产生，再留第三个入口就又是两套规则。
+    //   "未列阵"只由"关戒备"一个入口产生，再留第三个入口就又是两套规则。
     //   真要保留"被围攻就散"，它属于下轮的阵型增益（按 `formIntegrity` 打折那一条），
     //   不是这里再写一次 breakFormation。挂账见 `ROADMAP` 26。
     //   注意：`surround` 仍然要算——播报里"（N 面包夹）"读的就是它，只是不再动阵型状态。
-    const surround=surroundDirections(target);
     // 交火盖章：攻守双方都算"正在交战"，士气不再向稳态靠近（见 isEngaged）。
     //   放在这里而不是 attack 开头，是因为中途有早退分支；能走到这行才算真的打上了。
     attacker.lastFightAt=simTime;target.lastFightAt=simTime;
+    attacker.hitTarget=target.id;attacker.hitTargetAt=simTime;
+    // 「几面在打我」必须在盖章**之后**算：这一刀本身也该算进包围面数
+    //   （原来在盖章前算，第一刀永远少算自己那一面）。
+    const surround=surroundDirections(target);
     // 部队还活着时的将领存亡（斩首 / 刺杀 / 乱箭）。
     // **本轮 LEADER.deathCheck 恒 false，这段不触发**——它是唯一入口，
     //   以后要加特殊死法只改 deathCheck，别在别处另写一条判定。
@@ -2645,8 +2688,11 @@
         if(ally===attacker)changeMorale(ally,MORALE.KILL_SELF);
         else if(distance(ally,target)<=MORALE.RADIUS)changeMorale(ally,MORALE.KILL_NEAR);
       }
-      // 友军被击破（歼灭，兵没了）：附近友军吃重一点的打击
-      for(const ally of allUnits)if(ally.team===target.team&&ally!==target&&ally.hp>0&&distance(ally,target)<=MORALE.RADIUS)changeMorale(ally,MORALE.ALLY_LOST);
+      // 友军被击破（歼灭，兵没了）：按比例扣（2026-11-23 改口径，见 MORALE.BREAK_*）。
+      //   扣点在循环外算一次：放在循环里会让每支友军各算一遍「还剩几支」，
+      //   而循环里前面的扣点不会改变支数，算出来虽然相同，但以后有人往循环里加东西就会错。
+      const 破军=被击破扣点(target.team);
+      for(const ally of allUnits)if(ally.team===target.team&&ally!==target&&ally.hp>0&&distance(ally,target)<=MORALE.RADIUS)changeMorale(ally,-破军);
       // 将旗倒下的代价：全军士气重挫，光环同时消失
       // 97：`capHow` 只影响**将的结局写在哪一栏**（俘/亡），士气、收脚、击杀奖励一概不变——
       //   活捉不是"杀伤换成好处"，它不改善任何数值，只改这一句结论和结局文案。
@@ -2688,9 +2734,9 @@
           for(const u of allUnits)if(u.team===他方&&u.hp>0)changeMorale(u,MORALE.LEADER_LOST);
           note+=`${他方==='blue'?'我方':'敌方'}全军士气 ${MORALE.LEADER_LOST}。`;
         }
-        toast(`${target.name}被击破！${note}${attacker.team==='blue'?'我方':'敌方'}士气振奋${attacker.hp>0?`，${attacker.name} +${MORALE.KILL_SELF}`:''}。${capMiss}`);
+        toast(`${target.name}被击破！${note}附近友军士气 −${破军}。${attacker.team==='blue'?'我方':'敌方'}士气振奋${attacker.hp>0?`，${attacker.name} +${MORALE.KILL_SELF}`:''}。${capMiss}`);
       }}
-    else toast(`${attacker.name}从${arc}攻击${target.name}，造成 ${damage} 点伤害${ambush?'（突袭）':''}${counter>1?'（兵种克制）':''}${surround>1?`（${surround}面包夹）`:''}；目标生命 ${target.hp}/${target.maxHp}、士气 ${Math.round(target.morale)}。`);
+    else toast(`${attacker.name}从${arc}攻击${target.name}，造成 ${damage} 点伤害${counter>1?'（兵种克制）':''}${surround>1?`（${surround}面包夹）`:''}；目标生命 ${target.hp}/${target.maxHp}、士气 ${Math.round(target.morale)}。`);
   }
 
   // 敌军营级状态机：巡逻 → 目视接敌 → 交战 → 失去接触后查证 → 回到巡逻
@@ -2699,14 +2745,13 @@
     if(e.hp<=0||result)return;
     if(e.isRouted){e.state='溃退';return;}
     if(e.patrolWait>0)e.patrolWait=Math.max(0,e.patrolWait-dt);
-    // 与玩家部队同一套规则：目视才转向威胁，有预期则朝最后目击方向转头
-    if(e.reactTimer<=0){
-      if(e.alert==='ALERT'&&e.contact){
-        const foe=targetById(e.contact.id);
-        if(foe&&canSee(e,foe))turnToward(e,directionTo(e,foe),dt);
-      } else if(e.alert==='SUSPECT'&&e.contact){
-        turnToward(e,directionTo(e,e.contact),dt);
-      }
+    // 与玩家部队同一套规则：转向看**遇敌档**，不看"此刻看不看得见"。
+    //   已发现 → 正面朝敌；有预期 → 朝最后目击方向；未预期 → 保持原朝向（被摸到侧面就吃弧向惩罚）
+    if(e.meet==='已发现'&&e.contact){
+      const foe=targetById(e.contact.id);
+      if(foe&&canSee(e,foe))turnToward(e,directionTo(e,foe),dt);
+    } else if(e.meet==='有预期'&&e.contact){
+      turnToward(e,directionTo(e,e.contact),dt);
     }
     e.thinkTimer-=dt;
     if(e.thinkTimer>0)return;
@@ -2716,7 +2761,7 @@
     if(!visible.length){
       e.targetId=null;
       // 有情报但没看见人：派去查证，但只走到巡防区边界为止，不会一路杀过河
-      if((e.alert==='ALERT'||e.alert==='SUSPECT')&&e.contact&&AWARE.INVESTIGATE){
+      if(e.meet&&e.alert!=='ALERT'&&e.contact&&AWARE.INVESTIGATE){
         const goal=clampToZone(e,e.contact.x,e.contact.y);
         if(distance(e,goal)>1.6){
           if(!e.path.length){
@@ -2958,14 +3003,12 @@
       if(u.path.length){u.state='移动';return;}
       u.state='埋伏';return;
     }
-    // 目视到敌人才来得及摆正正面；有预期则朝最后目击方位转头；未预期时保持原朝向，被摸到侧面就吃弧向惩罚
-    if(u.reactTimer<=0){
-      if(u.alert==='ALERT'&&u.contact){
-        const foe=targetById(u.contact.id);
-        if(foe&&canSee(u,foe))turnToward(u,directionTo(u,foe),dt);
-      } else if(u.alert==='SUSPECT'&&u.contact){
-        turnToward(u,directionTo(u,u.contact),dt);   // 听说那个方向有敌，先把枪口转过去
-      }
+    // 已发现才来得及摆正正面；有预期则朝最后目击方位转头；未预期时保持原朝向，被摸到侧面就吃弧向惩罚
+    if(u.meet==='已发现'&&u.contact){
+      const foe=targetById(u.contact.id);
+      if(foe&&canSee(u,foe))turnToward(u,directionTo(u,foe),dt);
+    } else if(u.meet==='有预期'&&u.contact){
+      turnToward(u,directionTo(u,u.contact),dt);
     }
     // ── 行军接敌（74）：去某处的命令，路上射程内有敌就站住打 ──────────────
     // 这一条不是某个 order 的专属行为，是"走路的人被贴脸"的常识。以前它是空话：
@@ -3061,65 +3104,39 @@
     }
   }
 
-  // ── 109：戒备的自动开关（`GAME_RULES` §4.9）──────────────────────────
-  // 只有三条规则：
-  //   ① 已目视（ALERT）→ 自动戒备，不分敌我、不看是谁开的。
-  //   ② ALERT/SUSPECT **落到** UNAWARE 的**那一次** → 自动解除。**看跃迁，不看状态**：
-  //      没敌人时 alert 一直是 UNAWARE，按状态判会把玩家刚开的戒备在下一步就关掉（永远开不起来）。
-  //   ③ 溃退 → 强制散阵（优先级最高）。
-  // 「不看来源」是刻意的：系统开的与玩家开的一视同仁，脱敌一起关——代价是守桥打退一波后要重新开。
-  // 体力撑不起时不自动开（门槛与手动开关同一个 = `REARM`），否则"看见敌人→开→见底→关→又看见"
-  //   会每一步来回翻，队形在方阵与散阵之间抽搐。
-  // "敌情多久没更新就作废"（109）。不另发明一个数，直接由 98 的认知回落推出来：
-  //   先保住 `AWARE.HOLD`(6 秒) 的"已目视"，之后戒备按 `GUARD.DECAY`(0.1/秒) 从 1 掉到
-  //   `GUARD.SHOW`(0.35) 还要 6.5 秒 —— 合计 12.5 秒，正是 98 里 alert 落到"未预期"的时刻。
-  //   自己开着的戒备会给 guard 加地板，所以这里不能直接读 alert/guard，只能按情报时间算。
-  const INTEL_TTL = AWARE.HOLD + (1 - GUARD.SHOW) / GUARD.DECAY;
+  // ── 戒备（＝列阵＝战斗准备）的自动规则（2026-11-23 重做）────────────────
+  // 玩家只有一个开关，系统只在三处替他动：
+  //   ① **已发现 → 自动开**（看见敌人，不用人喊也会列阵）。体力撑不起时不自动开——
+  //      门槛与手动开关同一个 `REARM`，否则"看见→开→见底→关→又看见"会每步来回翻。
+  //   ② **未预期 → 锁死关**（被贴到近前时来不及列阵，**整场遭遇都不能列阵**）。
+  //      这是"埋伏"真正的惩罚；要让它只是"开头慌一下"，改这一行即可。
+  //   ③ **脱敌 6 秒 → 自动关**（写在 updateAwareness 里，清 meet 时一起关）。
+  // 有预期是唯一留给玩家的档：允许自己关。
+  // 旧的 `INTEL_TTL = HOLD + (1-SHOW)/DECAY = 12.5 秒` 随连续戒备一起删——
+  //   它存在的唯一理由是"guard 有中间值、得从 1 慢慢掉到 0.35"；现在只有 0/1，没有这条曲线。
   function syncFormation(u){
     const formed=u.stance==='FORMED';
     u.formation=formed?'FORMED':'BROKEN';
-    u.formationWhy=formed?null:(u.isRouted?'溃退':'散阵');
+    u.formationWhy=formed?null:(u.isRouted?'溃退':'未列阵');
+    u.guard=formed?1:0;      // 派生量，与 109 的 `formation` 同一套规矩：只在这里写
   }
   function updateStanceAuto(u){
     if(!u||u.hp<=0)return false;
     let changed=false;
     if(u.isRouted){
       if(u.stance!=='LOOSE'){u.stance='LOOSE';changed=true;}
-    } else if(u.alert==='ALERT'){
+    } else if(u.meet==='已发现'){
       if(u.stance!=='FORMED'&&u.stamina>=STAMINA.REARM){u.stance='FORMED';changed=true;}
-    } else if(u.stance==='FORMED'&&u.contact){
-      // ⚠️ 这里**不能**拿 `alert==='UNAWARE'` 当"敌情消失"：`SUSPECT` 的判据是
-      //   `guard>=GUARD.SHOW`，而"开戒备"把 guard 地板抬到 1 —— 换言之**自己开着戒备就
-      //   永远自认"有预期"，永远落不到 UNAWARE**，自动关一次也不会发生（实测死锁）。
-      //   所以改用"情报过期"这个真会消失的东西：`u.contact.t` 是最后一条目击/通报的时刻，
-      //   超过 `AWARE.HOLD`（6 秒）没刷新，就当敌情消失。
-      // 而且**必须"有 contact"才谈得上消失**：没敌情时手动开的戒备 contact 为 null，
-      //   用 prev/alert 判都会把它自己关掉（实测过，反例见 stance_test）。
-      // 关掉时顺手清 contact：判定敌情消失，就等于认定手里那份情报作废了。
-      if(simTime-u.contact.t>INTEL_TTL&&u.alert!=='ALERT'){
-        u.stance='LOOSE';u.contact=null;changed=true;   // ← 敌情消失那一次
-      }
+    } else if(u.meet==='未预期'){
+      if(u.stance!=='LOOSE'){u.stance='LOOSE';changed=true;}
     }
     const before=u.formation;
     syncFormation(u);
     return changed||before!==u.formation;
   }
-  // 戒备与精力。两条规则，一句能说清：
-  //   命令戒备＝地板（不衰减，所以收费）；战场动静＝尖峰（免费，自己淡出）；两者取大。
+  // 戒备此刻是否真的生效（体力见底时队形会自动打回常行，这里跟着认）。
+  // 2026-11-23 起戒备只有 0/1，所以这就是"开关 + 还有力气"两件事。
   function stanceOn(u){return u.stance==='FORMED'&&u.stamina>STAMINA.FORCE_DROP;}
-  function updateGuard(u,dt){
-    if(u.hp<=0)return false;
-    if(u.guardHold>0){
-      u.guardHold=Math.max(0,u.guardHold-dt);
-      if(u.guardHold===0)u.guardFloor=0;
-    }
-    const floor=stanceOn(u)?1:0;
-    const target=Math.max(floor,u.guardHold>0?u.guardFloor:0);
-    const before=u.guard;
-    if(u.guard>target)u.guard=Math.max(target,u.guard-GUARD.DECAY*dt);
-    else if(u.guard<target)u.guard=Math.min(target,u.guard+GUARD.RISE*dt);
-    return Math.abs(u.guard-before)>1e-4;
-  }
   // 精力只看当前在干什么：行军、驻守还是交战
   //   **「交战」只认与伤害结算同源的 lastFightAt**，不许拿 `targetId` 代判：
   //   orderAttack() 在下令那一刻就赋 targetId，人还在 30 格外就开始烧体力——
@@ -3197,7 +3214,21 @@
       // 交战中不向稳态靠近（2026-11-13 拍板）：打起来了，士气只由事件推动，
       //   不会被慢慢拉回；脱离交火 ENGAGE_MEMORY 秒后才恢复流动。
       //   这条与"速率 0.2/秒"是一套的——打得凶的时候士气不动，打完才慢慢回暖。
-      if(isEngaged(u))continue;
+      // **但被多面围攻会持续掉**（2026-11-23 新增）：稳态那条在交战中冻结，
+      //   所以这里不会和「兵力对比」重复——一个管战后回稳，一个管战时崩不崩。
+      //   1 面（单挑）不掉；2 面 −0.5/秒、3 面 −1.0、4 面 −1.5（SIEGE_RATE×面数−1）。
+      if(isEngaged(u)){
+        if(!u.isRouted){
+          const faces=surroundDirections(u);
+          if(faces>=2){
+            const before=u.morale;
+            u.morale=Math.max(0,u.morale-MORALE.SIEGE_RATE*(faces-1)*dt);
+            if(u.morale!==before)dirty=true;
+            if(u.morale<=MORALE.ROUT_AT)startRout(u);
+          }
+        }
+        continue;
+      }
       // 周边对比按兵力权重算（2026-11-13 拍板）：自己也要算进去，
       //   否则"1 打 1"会被算成 0:1 劣势。
       let mine=兵力权重(u),theirs=0;
@@ -3516,15 +3547,12 @@
         steerTurn(u,Math.atan2(f[1],f[0]),dt);
       }
 
-      // 2) 认知：先判断谁看见了谁，AI 再基于这个判断行动
+      // 2) 遇敌状态：先判谁看见了谁（定档只发生一次），AI 再基于这个判断行动。
+      //    2026-11-23 删掉了 2.2) 情报通报与 2.4) 的戒备推进：
+      //      通报（友军喊你）与枪声不再构成预警来源，戒备也不再有 0~1 的中间值可推。
+      //    精力仍在 2.4)，它是独立资源，与戒备无关。
       for(const u of allUnits)if(updateAwareness(u,dt))awareDirty=true;
-      // 2.2) 情报通报：看到的部队把方位传给身边友军，收的一方戒备抬起来
-      if(propagateWarnings(dt))awareDirty=true;
-      // 2.4) 戒备与精力：命令给地板、动静给尖峰，精力决定还能不能维持
-      for(const u of allUnits){
-        if(updateGuard(u,dt))awareDirty=true;
-        if(updateStamina(u,dt))staminaDirty=true;
-      }
+      for(const u of allUnits)if(updateStamina(u,dt))staminaDirty=true;
 
       // 3) AI 决策：玩家部队由 d 层维持逻辑；敌军决策已迁 c′ 层（main.js 调 COMMANDER.tick）
       for(const u of units)unitThink(u,dt);
@@ -3534,7 +3562,7 @@
       // 101：加速行军的三种收场（接战／体力见底／溃退）。排在精力结算之后，
       //   这样"体力刚好掉到 15 以下"这一步就能当场收回档位，不用多等一帧。
       for(const u of allUnits)updateForced(u);
-      // 3.4) 109：戒备的自动开关 + 派生成阵/散阵。排在 AI 之后——c′ 与 unitThink 都会写
+      // 3.4) 109：戒备的自动开关 + 派生成阵/未列阵。排在 AI 之后——c′ 与 unitThink 都会写
       //   stance，而"看见敌人必须戒备"是规则、不是 AI 的偏好，所以要覆盖它们这一步的选择。
       for(const u of allUnits)if(updateStanceAuto(u))awareDirty=true;
       // 3.45) 编制（⑸9）的九兵位次 **67 起不在这里推进**：它归 troop.js（e1），
@@ -3546,7 +3574,6 @@
       // 4) 交火结算
       for(const u of allUnits){
         if(u.hp<=0||!u.targetId)continue;
-        if(u.reactTimer>0)continue;   // 措手不及：这几秒反应不过来，只能挨打
         const t=targetById(u.targetId);
         if(!t){u.targetId=null;continue;}
           if(distance(u,t)<=u.range+RANGE_EPS+REACH2){
@@ -3554,6 +3581,11 @@
             if(u.attackTimer<=0){attack(u,t);changed=true;}
           } else if(u.order==='DEFEND'||u.order==='ADVANCE'||u.order==='MOVE'){u.targetId=null;}
       }
+
+      // 4.5) 112+：阵型排得下吗——二值、落位时判一次、不进 A*（见 judgeFormFit）。
+      //   排在交火之后：被看不见的人打会当场定"未预期"并锁死未列阵（attack → setMeet），
+      //   队形档因此在第 4 段里还会变一次；放在最后，这一条判的就是本步真实的档。
+      for(const u of allUnits)if(judgeFormFit(u))changed=true;
 
       // 5) 目标点：中央据点（宿营恢复）＋ 双方本营（失守重挫士气）
       if(updateSites(dt))changed=true;
@@ -3979,10 +4011,13 @@
     NUMBERS,数值框架:NUMBERS,
     兵力上限,重算上限,校验上限配置,扣减兵力,恢复兵力,残兵增益状态,残兵减伤比例,校验减伤曲线,
     记录混编,混编查询,兵力取整,画面兵数映射,
-    AWARE,GUARD,STAMINA,PATROL,PATROLS,MORALE,HEIGHT,SIGHT,
+    AWARE,STAMINA,PATROL,PATROLS,MORALE,HEIGHT,SIGHT,
     // 2026-11-13 士气重排的三个对外查询：交战状态、认知三档、开局士气唯一出口。
     //   面板、副将、测试都读这里，别自己再写一套判定（98 的教训：第二套判据迟早算出不同答案）。
-    isEngaged,meetLevel,meetShock,MEET_MORALE,兵力权重,开局士气,
+    isEngaged,MEET_MORALE,decideMeet,setMeet,兵力权重,开局士气,
+    // 2026-11-23 第二轮：士气只留伤害一个出口，但低士气压得更狠。
+    //   zealOf 是**唯一口径**（attack 与面板都读它）；被击破扣点 供击破结算与测试读。
+    zealOf,被击破扣点,
     // 驻守防区（73）：HOLD 给文档与测试读，holdOf 给"这支部队守哪儿"的对外查询
     //   （副将汇报、命令回执、测试都用它，别各自去读 u.hold——那个字段没有兜底）
     HOLD,holdOf,
@@ -3990,6 +4025,9 @@
     //   unitThink 与移动循环都读它。测试断言名单里没有撤退与跟随。
     ENGAGE_STOP,
     FORMATION,LEADER,leaderFalls,attachLeader,updateStanceAuto,syncFormation,
+    // 112+：阵型排得下吗（二值、落位时判一次、不进 A*）。测试直接驱动它，
+    //   免得为了造一次"站定"去跑满 40 步；step 里也是同一入口。
+    judgeFormFit,
     // 67：编制/队形整批搬到 troop.js（e1，全局名 TROOP）。d 层只留两条**同源查询**：
     //   foesWithin（九兵用不着，但 "u 身边几支敌军" 这个口径该只有一份）、facingVec（朝向→向量）。
     foesWithin,facingVec,
@@ -4016,7 +4054,7 @@
     // 占位（75）：d 层对外只有这一组判据，别处不许自己数格子
     OVERLAP,stackCount,foeOn,blockedFor,cellFree,stackAt,
     heightAt,eyeHeight,losCap,reported,isStale,visionRadius,fogRadius,
-    surpriseSeverity,contactSeverity,reactScale,attackArc,counterMultiplier,inArea,spawnArea,
+    attackArc,counterMultiplier,inArea,spawnArea,
     findSafePath,moraleWord,pathCost,findAttackPath,localBalance,stanceOn,
     // 103：连续坐标是唯一位置账本；104 起 `x/y` 是它的派生量。**外部要搬兵只能走 teleport**——
     //   只写 u.x 等于只改判定格、不改位置，104 的 distance 按 cx 算，于是"贴到脸上"其实没贴到
@@ -4028,9 +4066,9 @@
     get alpha(){return _alpha},
     drainToasts,drainEvents,logEvent,toast,peekLastToast,
     // 认知与状态更新（aware_test 探针直接调用）
-    firstContact,updateAwareness,propagateWarnings,directionTo,turnToward,attack,
+    updateAwareness,directionTo,turnToward,attack,
     enemyThink,patrolStep,clampToZone,findBackoffCell,unitThink,
-    updateGuard,updateStamina,staminaPhase,staminaDrain,updateMorale,changeMorale,startRout,rallyUnit,
+    updateStamina,staminaPhase,staminaDrain,updateMorale,changeMorale,startRout,rallyUnit,
     surroundDirections,checkRally,collectSlots,
     // 命令执行器：鼠标与文字/语音共用的统一入口（c↔d 契约，见上方注释块）
     orderMove,orderDefend,orderRetreat,orderAttack,orderAttackGroup,orderAdvance,

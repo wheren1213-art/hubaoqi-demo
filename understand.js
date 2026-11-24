@@ -68,7 +68,11 @@
       // 90 补：留在/留驻。"骑兵队过南桥，弓兵队留在北岸"里的"留在"原来不在任何词表里，
       //   于是整句被读成"两支部队一起过河"——玩家明说了有一支不动，系统把两支都拉走了。
       //   与 MOVE 的冲突已核：MOVE 认的是"到/去/往"，不含"在"。
-      '驻防','硬顶','死顶','堵住','守住阵脚','拦住','挡住','封锁','留在','留驻']],
+      '驻防','硬顶','死顶','堵住','守住阵脚','拦住','挡住','封锁','留在','留驻',
+      // 113+：「留下」「待着」——与「留在」是同一件事（兵停在这儿不走），原来只有"留在"在表里，
+      //   于是「把弓兵队留下」「在那儿待着」都回一句"要部队做什么"。
+      //   不收单字「待」：「待命」已在 STOP、且"待人接物"这类说法不该变成军令。
+      '留下','待着','待这儿','待那儿','待原地']],
     ['RECON',     ['侦察','侦查','搜索','探查','探路']],
     ['RETREAT',   ['撤退','后撤','撤回','退回','撤下','且战且退','收兵','鸣金','撤军','撤到','退到','撤往','跑路','溜了','拉扯','快跑','快退','闻金而退','全线后退','全线撤退','拔寨退兵','拔寨','撤',
       // 61 补：往后退的说法（后退/退缩/往后缩/往后拉/往回撤）——「后退」原来只在 CMD_PHRASE 里，
@@ -1632,7 +1636,10 @@
   }
   // 还原一条省略句。返回 null ＝ 不动（维持原判，58 的域外判据照旧）；{refuse} ＝ 追问；{text} ＝ 补全后的文本。
   function resolveEllipsis(raw,view){
-    const t0=cmdNorm(raw||'');
+    // 113+：先展开兵种统称（「所有枪兵」→ 四支）再判。
+    //   原来 expandArms 只在 parseCommand 里、省略还原之后跑，于是「所有枪兵也一样」
+    //   在这一层只认出"枪兵"一支，还原成"枪兵队前往某地"——说全军种，只去了一支。
+    const t0=expandArms(cmdNorm(raw||''));
     if(!t0)return null;
     const focus=(view&&view.focus)||null;
     const bare=t0.replace(/^(全军|全体|所有人|大家|各位|弟兄们|兄弟们|各队|众将)/,'').replace(/[。！!？?]/g,'');
@@ -1650,7 +1657,23 @@
       if(ellFinal(focus.phase))return {refuse:ellDoneMsg(focus)};
       const place=ellPlace(focus.dest);
       if(!place)return null;
-      const k=/守|驻|防|待/.test(t0)?'DEFEND':(/去|到|过|往|走|开/.test(t0)?'MOVE':focus.kind);
+      // 114 收口（上司拍）：**「在那儿射」不成话，不猜，直接说听不懂、请他重下。**
+      //   先记下这条的来路，免得下次又"顺手修好"：
+      //     · 113 及以前：这里只辨"守"与"走"，「在那儿射」落成 MOVE —— 兵走过去站着不射（错法一）。
+      //     · 114 我改成 ATTACK（到点即战，无敌则驻守），理由写在当时的注释里：
+      //       "宾语是地点不等于只是走过去"。**上司否了**：这条命令本身不该被理解——
+      //       射谁？射什么？玩家没说过。把它读成"去那儿打"或"去那儿守"，两个都是在替他补主语。
+      //     · 所以判据不是"改成另一个动作"，而是**这一类句子根本没构成命令**：
+      //       带打的动作、只有指示地点、没有目标 → 拒绝并要求重新输入。
+      //   ⚠ 只封"打"这一族；「守在那儿」「去那儿」照旧成立——它们的地点是真宾语，
+      //     补全不改变这句话的意思（57：猜错的代价远大于多问一句；这里连猜都不该猜）。
+      //   115 把这条写成了**通用判据**（见 `clauseGate`／`VALENCE`）：判的是配价，不是词表——
+      //     这一层补不出来的正是**宾语**，而"打"的必需成分就是宾语；"守/去"的必需成分是地点，
+      //     地点已经在那儿了，所以同一刀不该落在它们身上。两处结论相同，理由同源。
+      if(/射|打|攻|冲|放箭|齐射/.test(t0)&&!/守|驻|防|待/.test(t0))
+        return {refuse:'这句我听不懂——只说了要打、没说打谁。请重新下一道令：要打就点名打哪一支，要守就说「守住那儿」。'};
+      const k=/守|驻|防|待/.test(t0)?'DEFEND'
+        :(/去|到|过|往|走|开/.test(t0)?'MOVE':focus.kind);
       const verb=ELL_VERB[k];
       return verb?{text:`${ellUnits(focus.units)}${verb}${place}`,from:focus.id,kind:'there'}:null;
     }
@@ -1676,7 +1699,18 @@
        &&landmarkCandidates(t0).ids.length===0){
       if(ellFinal(focus.phase))return {refuse:ellDoneMsg(focus)};
       const foe=foeName(focus.foe);
-      if(foe)return {text:`${ellUnits(focus.units)}攻击${foe}`,from:focus.id,kind:'pronoun'};
+      if(foe){
+        // 113+：**玩家点了名就听他的**——代词只补宾语，不许覆盖主语。
+        //   原来这里无条件用 focus.units 重写整句，「骑兵队也去打他们」被执行成
+        //   「弓兵队去打」：玩家明说了骑兵队，系统把它换成上一条任务里的弓兵队，
+        //   回执还念"弓兵队正接近敌弓兵队"——这句是卷子 A10，实测就错在这里。
+        //   闸的形态与下面 ③b（代词作主语）同源：点了名就是明说，代词只剩语气作用。
+        //   **「全军」也算点名**——第一版按 ③b 的写法把 ALL 过滤掉了，
+        //   「全军去打他们」于是被改写成"上一条那几支去打"，说全军却只去了一支。
+        const named=cmdFindSpans(t0,unitWords());
+        if(named.length)return {text:t0.replace(ELL_PRONOUN,foe),from:focus.id,kind:'pronoun'};
+        return {text:`${ellUnits(focus.units)}攻击${foe}`,from:focus.id,kind:'pronoun'};
+      }
     }
     // ③b 代词作主语（85）：「他们去南桥」——代词指**上一任务派出去的那几支**。
     //   与 ③ 的分工一句话：**带地点指部队，带目标且没地点指敌人**。
@@ -1693,12 +1727,34 @@
         return {text:t0.replace(ELL_PRONOUN,ellUnits(focus.units)),from:focus.id,kind:'pronounUnit'};
     }
     if(!focus||ellFinal(focus.phase))return null;
+    // ③c 代词作地点宾语（113+）：「守住它」「把它占下来」——"它"指上一条去过的那处。
+    //   原来只有 ②（那儿/那里）认地点指代，「它」只被当成"不明指代"，一路问到 c 层
+    //   回一句"你说的「它」我认不出指哪儿"。玩家上一句刚说了地名，这一句的"它"没有第二个候选。
+    //   闸：① 句中没有任何具体地标（说了地名就听他的）；② 动作是守/占/夺/控这类**认地方**的。
+    if(focus.dest&&ellPlace(focus.dest)&&/(它|它们|那座|那条|那片)/.test(t0)
+       &&landmarkCandidates(t0).ids.length===0){
+      const k=/守|驻|防|待/.test(t0)?'DEFEND'
+        :(/占|夺|拿|控制|据/.test(t0)?'CAPTURE'
+        :(/去|到|过|往|走|开/.test(t0)?'MOVE':null));
+      if(k){
+        const txt=ellRender(focus,k,focus.units);
+        if(txt)return {text:txt,from:focus.id,kind:'pronounPlace'};
+      }
+    }
     // ④ 地点继承：「骑兵队也过去」——点了名、带省略标记、句中没有别的地点
     {
       const spans=cmdFindSpans(t0,unitWords());
       const noPlace=landmarkCandidates(t0).ids.length===0;
       const ellMark=/(也|再|同样|还)/.test(t0);
-      const moveish=actionWords('MOVE').some(w=>w.length>=2&&t0.indexOf(w)>=0);
+      // 113+：**「跟着」也算走**。原来只认 MOVE 词表里两字以上的词，
+      //   「骑兵队也跟着去」「所有枪兵也跟着」都被 FOLLOW 抢走，回一句"护卫得说两头"——
+      //   玩家说的是"他们也去那儿"，根本没提护卫。
+      //   闸：必须同时有承接标记（也/同样/一起/都）和**不是"跟着我"**（那是真护卫）。
+      //   ⚠ 判"跟着我"要看**宾语**，不能看句中有没有"主将"两个字：
+      //     「所有枪兵」展开后会变成"…、主将队"（85：枪兵含主将队），
+      //     第一版用 /主将/ 当闸，于是「所有枪兵也跟着」被自己的展开结果拦掉了。
+      const followish=ellMark&&/(跟着|跟上)/.test(t0)&&!/跟(着|上)?(我|我们|咱们)/.test(t0);
+      const moveish=actionWords('MOVE').some(w=>w.length>=2&&t0.indexOf(w)>=0)||followish;
       if(spans.length&&ellMark&&noPlace&&moveish){
         const place=ellPlace(focus.dest);
         if(place){
@@ -1708,6 +1764,34 @@
           if(txt)return {text:txt,from:focus.id,kind:'place'};
         }
       }
+    }
+    // ⑦ 承接换主语（113+）：「弓兵队继续」「所有枪兵也一样」——
+    //   主语是新的（玩家点了名），动作与宾语沿用上一条。
+    //   与 ①（整句只有"继续"）的分工：那条连主语一起沿用，这条只换主语、不换事。
+    //   四道闸：① 点了名；② 句中没有地点（有地点就是一条新命令）；
+    //   ③ 没有自己的动作词（有动作词的走 ④）；④ 上一条真有宾语可接。
+    if(focus&&focus.dest){
+      const spans=cmdFindSpans(t0,unitWords());
+      const noPlace=landmarkCandidates(t0).ids.length===0;
+      const contMark=/(继续|接着|一样|同样|照样|照旧|照原样)/.test(t0);
+      const ownAct=hasActionWord(t0);
+      if(spans.length&&noPlace&&contMark&&!ownAct){
+        const place=ellPlace(focus.dest);
+        const k=focus.kind==='DEFEND'?'DEFEND':(focus.kind==='CAPTURE'?'CAPTURE':'MOVE');
+        const ids=spans.map(s=>s.id).filter(id=>id!=='ALL');
+        const txt=place?ellRender(focus,k,ids.length?ids:focus.units):null;
+        if(txt)return {text:txt,from:focus.id,kind:'cont-subj'};
+      }
+    }
+    // ⑥ 承接「占下来」（113+）：「占下来/拿下来/夺下来」里的"下来"指的是**上一条说的那一处**，
+    //   不是地图中央那个据点。不接住的话，c 层会给 CAPTURE 补默认目标 OBJ——
+    //   玩家说的是刚打到的这块地，兵却跑向中央：这是"猜了宾语且猜错"，比追问坏得多。
+    //   闸：只认占领义的复合词（「打下来」是攻击，不收）；上一条必须真有一个地点。
+    if(focus&&focus.dest&&/(占下来|占下|拿下来|拿下|夺下来|夺下|控制下来)/.test(t0)){
+      if(ellFinal(focus.phase))return {refuse:ellDoneMsg(focus)};
+      const place=ellPlace(focus.dest);
+      const verb=ELL_VERB.CAPTURE;
+      if(place&&verb)return {text:`${ellUnits(focus.units)}${verb}${place}`,from:focus.id,kind:'down'};
     }
     // ⑤ 零形式：「再往东」「往北」——整句只有方位（+可选"再/推进"）
     {
@@ -1721,9 +1805,111 @@
     return null;
   }
 
+  // ══ 成句性闸（clauseGate，115）══════════════════════════════════════════
+  // 起因（上司 2026-11-24）：「『他们在那儿射』不是一个孤立事件——你首先要判断这句话是不是
+  //   一个正常的表达，如果是，才进入语义分析；如果不是就应该立刻反馈不理解。」
+  //   ⇒ 判据不能是"又发现一句补一句"，必须是一条能回答"什么话算一条命令"的规则。
+  //
+  // **判据是配价，不是黑名单。** 每个动作都有它必须被回答的那一问：
+  //   打 → 打谁；占 → 占哪儿；去 → 去哪儿。这一问答不出来、又无法从上一条继承，
+  //   这句话就**没有成立**（不是"解析失败"，是"你没说清楚"），回听不懂并指出缺哪一问。
+  //   拿默认值顶上等于替他补宾语——这正是「在那儿射」被读成 DEFEND/ATTACK 的根子。
+  //
+  // 与既有默认值的分界（**这两条保留，别顺手改成追问**）：
+  //   · 73「驻守/守住」缺地点＝脚下：'驻守'这个词本身蕴含就地，不是缺件；
+  //   · 62「冲锋」＝打眼前那支：战斗口令蕴含"朝眼前的敌人"，同上。
+  //   · 91「占领」缺地点＝中央据点：**按上司本轮口径收回**——"占"说不出占哪儿就不成立。
+  //
+  // 补件的顺序也是判据的一部分：**先查 CTX 继承，再追问**。
+  //   91 的经验：能继承却去问，是把玩家上一句说过的话再问一遍；不能继承却默认，是替他编。
+  // **表里只有一行，这是量出来的，不是漏了。** ATTACK 的"打谁"不进这张表：
+  //   62 已经把"喊一声就往上冲"定成产品规则——「冲／杀／上／全线进攻／给我打」这些
+  //   **战斗喊话**的宾语就是"眼前的敌人"，反过来问"打哪个"是把玩家的话退回给他。
+  //   实测（115）：把 ATTACK 也塞进这张表，`全线进攻／给我打／放箭／齐射／扫荡／打过去`
+  //   七句全部从"打眼前那支"变成"请点名"，那是**拿新规则推翻了 62**，不是修缺件。
+  //   所以 ATTACK 只做"先继承、继承不到交给 c 层原有处置"（点名下令追问目标、喊话打眼前）；
+  //   而「在那儿射」这种"地点状语＋及物动词"由省略还原层拒（见 ② 指示 分支）——
+  //   那一层才知道"在那儿"是状语还是宾语，c 层看不到这个区别。
+  const VALENCE={
+    CAPTURE:{need:'place',
+      ask:()=>'这句我听不懂——只说了要占、没说占哪儿。可以说「占领中央据点」，或者「全军去西侧营地，到了就占下来」。'},
+  };
+  // 战斗口令（62）：整句就是一声喊，标的物由"眼前的敌人"给出，不算缺宾语。
+  //   判据是**整句只剩这个口令**——「用箭射」多了"用箭"两个字就不是口令了（那是缺宾语）。
+  const BATTLE_CRY=/^(全军|全体|所有人|各队|三军|众将|都|一起)?(冲|杀|上|冲啊|杀啊|冲呀|上啊|冲锋|全力冲|跟我上|冲阵|掩杀|冲杀|突击|压上|包抄|追击)$/;
+  // 从 CTX 补一件：能补上就补，补不上返回 false（**不写默认值**）。
+  //   只补"上一条真说过的那件事"：ATTACK 补目标、CAPTURE 补地点。
+  //   **先看 focus，再往回翻**：`停止/戒备/常行` 这类动作本身没有宾语，
+  //   它们不该把上下文里的宾语作废——「攻击敌弓兵队」→「全军停止」→「继续打」，
+  //   玩家心里那支敌人一直是敌弓兵队（B19）。只看 focus 的话，中间插一句"停止"就把宾语丢了。
+  //   往回翻最多到**最近一次带该宾语的同类任务**，不跨动作族：
+  //   上一个任务是"去北桥"，不能拿那座桥去填"打谁"。
+  //   已完成的任务不补（`ellFinal`）——那是另一件事的宾语，拿过来就是新的猜。
+  //   另一条边界：**续令词才许穿过"被顶掉"的任务**。「攻击敌弓兵队」→「全军停止」会让那条
+  //   ATTACK 变成 superseded（`dropTasks`），此时「继续打」说的正是它——玩家明说了"接着刚才那件"，
+  //   所以续令词（继续/接着/照旧/恢复）允许从 superseded 里取；没有续令词就不许，
+  //   否则「攻击」会莫名其妙接着十分钟前那支敌人打。
+  const RESUME_RE=/(继续|接着|照旧|恢复|还打|还是打)/;
+  function valveFromCtx(cmd,text){
+    const view=ctxSnapshot();
+    if(!view)return false;
+    const resume=RESUME_RE.test(String(text||''));
+    const want=cmd.action==='ATTACK'?'foe':(cmd.action==='CAPTURE'?'place':null);
+    if(!want)return false;
+    const hit=t=>{
+      if(!t)return null;
+      if(want==='foe')return (t.kind==='ATTACK'&&t.foe)?t.foe:null;
+      return (t.kind==='CAPTURE'&&t.dest&&t.dest.type==='place'&&t.dest.id)?t.dest.id:null;
+    };
+    const f=view.focus;
+    if(f&&!ellFinal(f.phase)){
+      const v=hit(f);
+      if(v){if(want==='foe')cmd.foeId=v;else cmd.locId=v;return true;}
+    }
+    if(!resume)return false;
+    const ts=view.taskings||[];
+    for(let i=ts.length-1;i>=0;i--){
+      const t=ts[i];
+      if(!t)continue;
+      // 'done'/'lost' 是真的办完了/部队没了——拿它补就不是"接着"，是翻旧账
+      if(t.phase==='done'||t.phase==='lost')continue;
+      const v=hit(t);
+      if(v){if(want==='foe')cmd.foeId=v;else cmd.locId=v;return true;}
+      // 往回翻的闸：只穿过"没有宾语"的任务（停止/戒备/常行/报告），
+      //   碰到一个**有自己宾语的**任务就停——那说明玩家已经换了目标，再往前翻就是旧账。
+      if(t.dest&&t.dest.type==='place')break;
+      if(t.foe)break;
+    }
+    return false;
+  }
+  // 返回 null ＝ 这句话成立；否则返回"该怎么追问"。只判**补足语**，
+  //   主语缺省（62 画面内 / 选中那支）不在这道闸里——那是产品规则，不是句子残缺。
+  function clauseGate(cmd,text){
+    if(!cmd||!cmd.action)return null;          // 连动作都没有：由"要部队做什么"那条管
+    if(cmd.ops&&cmd.ops.length)return null;    // 多步令自带完整两段
+    const v=VALENCE[cmd.action];
+    if(!v)return null;
+    // ① 已经齐了
+    if(v.need==='target'&&(cmd.foeId||cmd.dir||cmd.locId))return null;
+    if(v.need==='place'&&(cmd.locId||cmd.dir||cmd.multiLocs))return null;
+    // ② 战斗口令不算缺
+    if(v.need==='target'&&BATTLE_CRY.test(String(text||'').replace(/[。！!？?，,]/g,'')))return null;
+    // ③ 从上一条继承（"用箭射""继续打""占下来"都是这一条救回来的）
+    if(valveFromCtx(cmd,text))return null;
+    // ④ 真的缺 → 追问，不许执行
+    return {need:v.need,question:v.ask()};
+  }
+
   // 解析一条自然语言指令 → 结构化命令。这里只做"识别与消歧"，
-  // 缺件不在解析层追问，由 c 层在执行前统一校验并追问。
-  function parseCommand(raw){
+  // 缺件主要由 c 层在执行前统一校验并追问；**例外是成句性**（115 `clauseGate`）——
+  //   一句话缺的是"必需成分"（打谁/占哪儿）时，那不是"待补的槽"，而是这句话没成立，
+  //   必须在 b 层就回"听不懂并说明缺哪一问"，否则 c 层只能用默认值替玩家补上。
+  function parseCommand(raw,opt){
+    // 115：`opt.chain` ＝"这是组合句里的一段"。**成句性判据要看整句**——
+    //   「到了就占下来」的"占哪儿"在前一段里，单看这一段它永远缺地点。
+    //   组合句的补件由 c 层 `parseChain` 的 inherit 负责（它才看得见前一段），
+    //   所以这一段不判成句、也不从 CTX 抢宾词。单句调用（opt 缺省）照判。
+    const chainSeg=!!(opt&&opt.chain);
     // 87：每句话只装配一次地图事实（见 mapCtx 的注释）。**必须在这里清**——
     //   这是解析的唯一入口，放在别处会漏掉直接调 parseCommand 的路径（测试与 c 层都在用）。
     mapReset();
@@ -2088,6 +2274,24 @@
     }
     // "原地集合/站到一起"：位置就是部队自己，不用问地点
     if(!lmIds.length&&['MOVE','DEFEND','RALLY','CAPTURE'].includes(cmd.action)&&isHerePhrase(text))cmd.locId=HERE;
+    // 113+：「回来/回撤/退回」——说了"回"、没说地名，指的就是**本方本营**。
+    //   为什么补 HOME 而不是留着追问：这三个字在玩家嘴里只有一个意思（回自家后方），
+    //   问一句"要回到哪里"等于把他说过的话再问一遍。卷子里的 A19「让他们都回来」、
+    //   B14「回来吧」都卡在这里，而「回营」这条早就通——差别只在地标词表里有没有那个名词。
+    //   四条闸：
+    //     ① 一个地点都没认出来（说了"回北桥"就听他的，地标优先）；
+    //     ② 动作是在走（MOVE / RETREAT）——「撤回归还」不是军令；
+    //     ③ 不收「过来」：它常用来描述（"他们过来了吗"），收进来会把一句问话变成命令；
+    //     ④ 不收「本营/后方/老家」这类**名词**：它们归地标词表，这里只认动作性的"回"。
+    //   放在方向解析之前：「往后退」里的"后"是走一段，不是回营——它由下面的方向表接住；
+    //   放在这条之前的话，"撤回后方"会先被认成 dir='后'。
+    //   ⚠ `'HOME'` **不是新哨兵，是图上真有的地标 id**：`worldgen.js` 里写死
+    //     `{id:'HOME', name:'我军本营', kind:'base'}`（敌军是 `HOME_E`），十种种子都验过。
+    //     c 层 `RETREAT` 的 `arrive:'HOME'` 用的也是它——所以这里填它，`cmdValidate` 认得、
+    //     d 层拿得到坐标。**别改成新造的常量**，那会让 `DANGLING_LOC` 把整句拒掉。
+    if(!lmIds.length&&!cmd.locId&&!cmd.placeMissing
+       &&(cmd.action==='MOVE'||cmd.action==='RETREAT')
+       &&/(回来|回去|回撤|撤回|回营|回师|返回|退回来)/.test(text))cmd.locId='HOME';
     // 驻守没给地点＝就地驻守（73）。这不是"少了一个槽"，而是这句话本来就成立：
     //   「全军驻守」的意思是"守你们脚下这块地"，而「全军出发」没有地点根本不成话。
     //   这正是原则①的样子——谓语不因缺宾而改变，宾语缺省时取"当前阵地"。
@@ -2231,6 +2435,22 @@
         cmd.ops=[main,'FORCED_ON'];
       }
     }
+    // ── 115：成句性闸 ────────────────────────────────────────────────────
+    // 放在**最后**：前面那些追问（多地标、多目标、双动作矛盾）都比"缺宾语"更具体，
+    //   有更该说的话就先说那句话。到这里还没被拦下、却不满足配价的，才交给这道闸。
+    // 只对 ATTACK 的目标、CAPTURE 的地点动手（`VALENCE` 表里两行）——
+    //   其余动作的缺件由 c 层原有追问处理（MOVE/RALLY 问"要前往哪里"，带候选列表），
+    //   在 b 层再造一套只会出现两种措辞问同一件事。
+    // ATTACK 不在这张表里，但**继承要先做**：`VALENCE` 只管"缺了要不要追问"，
+    //   而"上一条说过"对所有动作都一样该补（B10「用箭射」、B19「继续打」都靠这一步）。
+    //   补完仍没有目标是 c 层的事（点名下令→追问；喊话→打眼前那支，62）。
+    if(!chainSeg){
+      if(cmd.action==='ATTACK'&&!cmd.foeId&&!cmd.dir&&!cmd.locId&&!(cmd.ops&&cmd.ops.length))
+        valveFromCtx(cmd,text);
+      const g=clauseGate(cmd,text);
+      if(g)return {cmd,clarification_required:true,missing:g.need==='target'?'target':'location',
+        assistantQuestion:g.question};
+    }
     return {cmd,clarification_required:false};
   }
 
@@ -2366,7 +2586,7 @@
   globalThis.UNDERSTAND={
     // 解析与理解（纯逻辑，不依赖 wire，可注入任意注册表独立测试）
     // parse 走 guardOut：绑定了 c 层能力表之后，b 层不会交出 c 层不认识的 action。
-    parse:raw=>guardOut(parseCommand(raw)),parseCommand:parseCommand,guard:guardOut,
+    parse:(raw,opt)=>guardOut(parseCommand(raw,opt)),parseCommand:parseCommand,guard:guardOut,
     bindCaps:bindCaps,declaredActions:declaredActions,
     declaredTactics:declaredTactics,TACTICS:TACTICS,
     initRegistry:initRegistry,cmdNorm:cmdNorm,cmdFindSpans:cmdFindSpans,

@@ -114,7 +114,7 @@
   const camRect = () => ({ x: cam.x, y: cam.y, w: canvas.width / cam.zoom, h: canvas.height / cam.zoom });
   function centerOn(wx, wy){ cam.x = wx - canvas.width / cam.zoom / 2; cam.y = wy - canvas.height / cam.zoom / 2; clampCam(); }
   // 画面（= 主将视野框）内的格范围，c 层判"这句短令谁能听见"用。
-  //   +1 格的余量：兵簇会跨出中心格（散阵最远到 1 格），卡在边界上的部队不该被算成画面外。
+  //   +1 格的余量：兵簇会跨出中心格（未列阵最远到 1 格），卡在边界上的部队不该被算成画面外。
   function viewTiles(){
     const r = camRect();
     return { x0: r.x / S.TILE - 1, y0: r.y / S.TILE - 1,
@@ -296,7 +296,7 @@
       // 薄雾区的部队走 reported()：面板上是信使带回来的旧情报，不是此刻的真值
       const v=S.reported(u);
       const txt=u.hp>0
-        ? `${u.type} · ${u.speed} 格/秒 · ${v.hp}/${v.maxHp} HP · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='FORMED'?'列阵':'散阵'}${v.forced?'·加速':''} · ${S.alertWord(v)} · ${v.state}${v.stale>0?` · 情报 ${v.stale.toFixed(1)}s 前`:''}`
+        ? `${u.type} · ${u.speed} 格/秒 · ${v.hp}/${v.maxHp} HP · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='FORMED'?'列阵':'未列阵'}${v.forced?'·加速':''} · ${S.alertWord(v)} · ${v.state}${v.stale>0?` · 情报 ${v.stale.toFixed(1)}s 前`:''}`
         : (u.captured ? '被俘' : '阵亡');
       if(b.dataset.txt!==txt){
         b.dataset.txt=txt;
@@ -320,7 +320,7 @@
         const v=S.reported(u);
         if(v.stale>0){
           t=`${u.name} · 情报约 ${v.stale.toFixed(1)} 秒前\n`
-           +`生命 ${v.hp}/${v.maxHp} · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='FORMED'?'列阵':'散阵'} · 状态：${v.state}\n`
+           +`生命 ${v.hp}/${v.maxHp} · 士气 ${Math.round(v.morale)}（${S.moraleWord(v.morale)}） · ${v.stance==='FORMED'?'列阵':'未列阵'} · 状态：${v.state}\n`
            +`位置 (${Math.round(v.x)}, ${Math.round(v.y)}) · 认知：${S.alertWord(v)}\n`
            +`它在主将视野之外，这是信使刚带回的旧情报；要实时，把主将带过去。`;
         } else {
@@ -346,25 +346,29 @@
         if(boss&&boss.hp>0&&!boss.isRouted&&boss!==u&&S.distance(u,boss)<=S.MORALE.AURA_RADIUS)
           extras.push(`将旗光环 +${S.MORALE.AURA}`);
         // 101：加速行军是档位状态，与戒备并列报（两者可同时开，费用相加）
-        extras.push(`${u.stance==='FORMED'?'列阵中':'散阵'}${u.forced?' · 加速行军':''} 精力 ${Math.round(u.stamina)}`);
+        extras.push(`${u.stance==='FORMED'?'列阵中':'未列阵'}${u.forced?' · 加速行军':''} 精力 ${Math.round(u.stamina)}`);
         const grp=selection.length>1?`｜编组 ${selection.length} 支`:'';
         const foeName=u.contact?(S.targetById(u.contact.id)||{}).name:'';
         const ago=u.contact&&u.contact.t!=null?Math.max(0,S.simTime-u.contact.t):null;
-        const g=Math.round(u.guard*100);
-        const aware=u.reactTimer>0
-          ? `措手不及，还要 ${u.reactTimer.toFixed(1)} 秒才反应得过来`
-          : u.alert==='ALERT'
-            ? `已目视${foeName?`（${foeName} 在视野内）`:'来敌'}，自动摆正正面`
-            : u.alert==='SUSPECT'
-              ? `有预期——戒备 ${g}%${u.contact?`，最后目击在 (${Math.round(u.contact.x)}, ${Math.round(u.contact.y)})${ago!=null?` ${ago.toFixed(0)} 秒前`:''}`:''}，但没看见人`
-              : `未预期——戒备 ${g}%，被贴身撞上会吃全威力突袭`;
+        // 遇敌状态（2026-11-23 重做）：只报**这一波遭遇的档**，定档只发生一次。
+        //   戒备没有百分比可报了（只有 0/1），"此刻看不看得见"另说——那是 alert，与定档无关。
+        const aware = !u.meet
+          ? (u.alert==='ALERT' ? '已看见敌军，正在定档' : '未接敌——视野内没有敌军')
+          : u.meet==='已发现'
+            ? `已发现${foeName?`（${foeName}）`:''}——${u.alert==='ALERT'?'此刻在视野内':'已离开视野，仍按这一档算'}`
+            : u.meet==='有预期'
+              ? `有预期——看见时已在近处，当时开着戒备${u.contact?`；最后目击 (${Math.round(u.contact.x)}, ${Math.round(u.contact.y)})${ago!=null?` ${ago.toFixed(0)} 秒前`:''}`:''}`
+              : `未预期——戒备关着被贴到近处，整场遭遇不能列阵`;
         // ㊵：阵型与将领只报状态，不提加成——机制还没接，说了就是骗玩家
-        // ⑸9：阵型名跟着"这支在干什么"变（行军纵阵 / 接敌线阵 / 溃退散阵），
+        // ⑸9：阵型名跟着"这支在干什么"变（行军纵阵 / 接敌线阵 / 溃退未列阵），
         //   结阵状态另外报，两件事不混：一名是排法，一个是稳不稳。
         // 67：阵型名归 troop.js 算（它才是那份动画状态的持有者），面板只读不给。
-        // 109：阵型名（这一帧怎么排）与成阵/散阵（戒备开没开）现在是同一件事的两面，
-        //   所以只在"散阵但有缘由"时补一句（溃退），不再写"已结阵/破阵"那套旧词。
-        const formTxt=`${TROOP.formationLabel(TROOP.formKeyOf(u))}（${u.formation==='FORMED'?'成阵':`散阵${u.formationWhy&&u.formationWhy!=='散阵'?`：${u.formationWhy}`:''}`}）`;
+        // 111：术语统一——「散阵」这个词作废，改叫「未列阵」（上司 11-23 拍板）。
+        //   连带的坑：`SKIRMISH` 的模板名也叫「未列阵」了，若仍按「模板名（状态）」拼，
+        //   会拼出「未列阵（未列阵）」。所以未列阵时只写状态本身，有缘由才补括号（溃退）。
+        const formTxt = u.formation === 'FORMED'
+          ? `${TROOP.formationLabel(TROOP.formKeyOf(u))}（成阵）`
+          : `未列阵${u.formationWhy && u.formationWhy !== '未列阵' ? `（${u.formationWhy}）` : ''}`;
         const leadTxt=(u.leader&&u.leader.alive)?` · ${u.leader.kind==='commander'?'主将亲在':'将领随军'}`:'';
         // ㊸：地形对视野的影响要报出"为什么"，不能只给一个数。
         //   数字是结果，原因是玩家能拿来决策的东西（要不要现在上山/钻林/贴河走）。
@@ -381,7 +385,7 @@
         const armedTxt=u.armed
           ? `\n待触发：等${u.armed.text} · 已挂 ${Math.max(0,S.simTime-u.armed.since).toFixed(0)} 秒${u.holdFire?' · 伏着不动（被打了才还手并暴露）':''}`
           : (u.holdFire?'\n伏击中：不主动接敌（被打了才还手并暴露位置）':'');
-        t=`生命 ${u.hp}/${u.maxHp} · 士气 ${Math.round(u.morale)}（${S.moraleWord(u.morale)}） · 精力 ${Math.round(u.stamina)} · 状态：${u.state}${u.path.length?` · 剩余 ${u.path.length} 格`:''}${grp}\n${edge} · 伤害系数 ×${(.7+S.MORALE.BONUS*(u.morale/100)).toFixed(2)}${extras.length?` · ${extras.join(' · ')}`:''}\n阵型：${formTxt}${leadTxt}\n${visionLine}\n认知：${aware}${armedTxt}`;
+        t=`生命 ${u.hp}/${u.maxHp} · 士气 ${Math.round(u.morale)}（${S.moraleWord(u.morale)}） · 精力 ${Math.round(u.stamina)} · 状态：${u.state}${u.path.length?` · 剩余 ${u.path.length} 格`:''}${grp}\n${edge} · 伤害系数 ×${S.zealOf(u.morale).toFixed(2)}${extras.length?` · ${extras.join(' · ')}`:''}\n阵型：${formTxt}${leadTxt}\n${visionLine}\n认知：${aware}${armedTxt}`;
         }
       }
     }
@@ -469,11 +473,12 @@
   // 它和 canSee / 迷雾用的是同一个 visionRadius 与 losCap，所以这条线**就是判定边界**：
   //   山脊后面、林子后面会直接塌进来一个缺口。这就是"地形影响视野"在画面上的样子——
   //   不需要玩家去读数字，也不需要另建一套"视野预览"公式（另建就必然和判定分叉）。
-  // 缓存键里带 guard：戒备拉满时环会当场变大，玩家看得见"戒备换情报"这件事。
+  // 缓存键里的 guard 现在是 0/1 派生量（2026-11-23 起戒备不加视野），留着只是便宜——
+  //   真要按状态区分，用 stance 更直白。
   const VISION_RAYS = 72;
   let visionCache = { key: '', pts: [] };
   function visionPolygon(u) {
-    const key = `${u.id}|${Math.round(u.x)}|${Math.round(u.y)}|${Math.round(u.guard * 10)}|${u.facing}`;
+    const key = `${u.id}|${Math.round(u.x)}|${Math.round(u.y)}|${u.stance}|${u.facing}`;
     if (visionCache.key === key) return visionCache.pts;
     const R = S.fogRadius(u), pts = [];
     const ox = Math.round(u.x), oy = Math.round(u.y);
@@ -1314,16 +1319,14 @@
       ctx.fillStyle=d.stance==='FORMED'?'#e3c96a':d.stamina<S.STAMINA.TIRED?'#cf6152':'#7fae7a';
       const staminaH=sh*(d.stamina/S.STAMINA.MAX);ctx.fillRect(bb.x1+1.4,bb.y0+.6+sh-staminaH,1.5,staminaH);
       ctx.globalAlpha=1;
-      // 认知角标：灰点＝未预期，黄点＝有预期（戒备中但没看见人），红杠＝已目视；白框闪烁＝措手不及
-      if(d.reactTimer<=0){
-        if(d.alert==='ALERT'){
-          ctx.fillStyle='#e2726a';ctx.fillRect(bx+bw+1.6,by+.2,2,4.8);
-        } else {
-          ctx.fillStyle=d.alert==='SUSPECT'?'#e0c25f':'#7d8a80';
-          ctx.fillRect(bx+bw+1.6,by+1.4,2.4,2.4);
-        }
+      // 认知角标（2026-11-23 改读遇敌档）：红杠＝已发现，黄点＝有预期，灰点＝未预期/未接敌。
+      //   白框闪烁的"措手不及"随反应延迟一起删了——那个状态已经不存在。
+      if(d.meet==='已发现'){
+        ctx.fillStyle='#e2726a';ctx.fillRect(bx+bw+1.6,by+.2,2,4.8);
+      } else {
+        ctx.fillStyle=d.meet==='有预期'?'#e0c25f':'#7d8a80';
+        ctx.fillRect(bx+bw+1.6,by+1.4,2.4,2.4);
       }
-      if(d.reactTimer>0&&Math.floor(performance.now()/130)%2===0){ctx.strokeStyle='#fff2b8';ctx.lineWidth=2;ctx.strokeRect(bb.x0-1.5,bb.y0-1.5,bb.x1-bb.x0+3,bb.y1-bb.y0+3);ctx.lineWidth=1;}
       if(d.isRouted){ctx.strokeStyle='#e7d98f';ctx.setLineDash([3,2]);ctx.strokeRect(bb.x0-.5,bb.y0-.5,bb.x1-bb.x0+1,bb.y1-bb.y0+1);ctx.setLineDash([]);}
       else if(d.morale<=35){ctx.strokeStyle='#d9534f';ctx.strokeRect(bb.x0-1.5,bb.y0-1.5,bb.x1-bb.x0+3,bb.y1-bb.y0+3);}
       // 情报滞后：虚框 + 上方小沙漏，和"实时"一眼能分开
@@ -1393,7 +1396,7 @@
       }
     }
     // 选中部队的最后目击点：有预期时画个问号，玩家能看出情报指向哪里，也知道那是旧位置
-    if(selected&&selected.hp>0&&selected.alert==='SUSPECT'&&selected.contact){
+    if(selected&&selected.hp>0&&selected.meet&&selected.alert!=='ALERT'&&selected.contact){
       const cx=selected.contact.x*S.TILE+S.TILE/2,cy=selected.contact.y*S.TILE+S.TILE/2;
       ctx.strokeStyle='#e0c25f';ctx.setLineDash([2,3]);
       ctx.beginPath();ctx.arc(cx,cy,S.TILE*.85,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
@@ -1676,7 +1679,7 @@
     flush();refresh();
   });
   // 109：这个按钮是**唯一的阵型命令**——"列阵"和"戒备"是同一件事。
-  //   开＝保持战斗队形（走起来自动转行军、停下自动转战斗队形），关＝散阵。
+  //   开＝保持战斗队形（走起来自动转行军、停下自动转战斗队形），关＝未列阵。
   //   系统还有一条自动入口：已目视敌军时会自己开；脱敌时自己关（`sim.js` updateStanceAuto）。
   //   **已目视期间按钮置灰**：不是禁用能力，是那条命令此刻不会生效（下一步会被开回去），
   //   让它可点就是个"点了没反应"的假按钮。
@@ -1684,12 +1687,16 @@
   function refreshStance(){
     const live=liveSelection();
     const on=live.length>0&&live.every(u=>u.stance==='FORMED');
-    const locked=live.length>0&&on&&live.every(u=>u.alert==='ALERT');
+    // 两个方向都会锁（2026-11-23）：已发现 → 自动开着、不许关；未预期 → 锁死关、不许开。
+    //   有预期是唯一自由的档。判据与 `stanceUnitsOn/Off` 是同一句话，两处必须一起改。
+    const sealedOff=live.length>0&&on&&live.every(u=>u.meet==='已发现');
+    const sealedOn=live.length>0&&!on&&live.every(u=>u.meet==='未预期');
     const label=on?'转为常行':'转入戒备';
     if(stanceButton.textContent!==label)stanceButton.textContent=label;
     stanceButton.classList.toggle('selected',on);
-    stanceButton.disabled=locked;
-    stanceButton.title=locked?'已目视敌军，散不得阵——要收队先脱离接触':'';
+    stanceButton.disabled=sealedOff||sealedOn;
+    stanceButton.title=sealedOff?'已发现敌军，这一波不能收队——要收队先脱离接触'
+      :sealedOn?'未预期遇敌，来不及列阵——这一波只能以未列阵打':'';
   }
   stanceButton.addEventListener('click',()=>{
     const live=liveSelection();

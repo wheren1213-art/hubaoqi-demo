@@ -320,10 +320,9 @@
       else if (r.stamina < 50) s += '，精力有些乏';
     }
     if (r.stance === 'FORMED') s += '，还列着阵';
-    // 认知只说"吃亏的那一头"：已目视不必夸一遍，没准备才要提醒
-    if (r.alert === '未预期') s += '，还没察觉敌人';
-    else if (r.alert === '措手不及') s += '，被打了个措手不及';
-    else if (r.alert === '有预期') s += '，只听说有敌、还没见着';
+    // 遇敌档只说"吃亏的那一头"：已发现不必夸一遍，没准备才要提醒（2026-11-23 改读 meet）
+    if (r.meet === '未预期') s += '，未预期遇敌，这一波列不了阵';
+    else if (r.meet === '有预期') s += '，看见时敌人已在近处';
     if (r.lastStopReason) s += `；之前是因为「${String(r.lastStopReason).replace(/[。.]\s*$/, '')}」停下的`;
     return `${s}。`;
   }

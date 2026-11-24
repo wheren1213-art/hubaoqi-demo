@@ -181,7 +181,7 @@
       [-1.20, .25], [-.60, .15], [-.05, .35], [.55, .20],
       [1.15, .40], [-.35, .75], [.45, .85]
     ] },
-    SKIRMISH: { name: '散阵', cells: null }            // 溃退/破阵：位置按单位 id 现算，见 scatterSlots
+    SKIRMISH: { name: '未列阵', cells: null }            // 溃退/破阵：位置按单位 id 现算，见 scatterSlots
   };
 
   // ── 关掉戒备时的兵位（110 重写）────────────────────────────────────
@@ -196,7 +196,8 @@
   //      600 次都没落成，取 4000 次里离别人最远的那个（兜底；实测一次都用不到）。
   // 形状：**竖长椭圆、长轴朝行进方向**（局部 y 正＝前方），与 108 的水滴同向。
   //   区别在于水滴是"一份写死的坐标、16 支部队长得一样"，这里**每支部队都不同**（id 做种子）——
-  //   上司 110 的原话是「水滴不是阵型，是散阵的自然状态」，自然感来自"每支都不一样"，不是形状本身。
+  //   上司 110 的原话是「水滴不是阵型，是散阵的自然状态」（原话用的是旧词，111 起统一改称「未列阵」，
+  //   引用不改字），自然感来自"每支都不一样"，不是形状本身。
   // 两条硬边界与 COLUMN 同一套：|x| < 0.5 ⇒ 横向不跨格；|y| < 1.5 ⇒ 纵向 ±1 格。
   // 实测（19 支部队 × 11/16 兵 = 38 组）：重叠 0 对、最小间距 8.0px、占格恒 3 格、兜底 0 次。
   const SKIRM_RX = .46, SKIRM_RY = 1.36;
@@ -392,32 +393,27 @@
   // 队形由"这支部队此刻在干什么"推出来，**不另存一份状态**（存了就要有人负责同步，迟早不一致）。
   //   110 起只有三档：溃退／关掉戒备 → 没有坐标表（随机撒，见 scatterSlots）；
   //   开戒备 + 战斗或停下 → BLOCK；开戒备 + 走且无敌情 → COLUMN。
-  const isEngaged = u => !!u.targetId || u.alert === 'ALERT' || !!u.contact;
-  // ── 109：队形只有三个状态，由"戒备开关 + 是否在战斗 + 是否在移动"推出 ──
-  // 玩家**不选队形**，只开/关戒备（`GAME_RULES` §4.9）：
-  //   关            → 散阵（SKIRMISH）。走也散、停也散。
-  //   开 + 已进战斗 → 战斗队形（BLOCK），**移动、进攻时也保持**。
-  //   开 + 停下     → 战斗队形（BLOCK）。"停下"与"进入战斗"在队形上是同一档。
-  //   开 + 在走 + 无战斗 → 行军（COLUMN）。
-  // 战斗状态 = `ALERT`（已目视），或"**有具体敌情的** `SUSPECT`"（`u.contact` 非空：
-  //   友军通报、或自己刚丢掉目视留下的最后目击点）。
-  //   ⚠️ 不能直接写 `alert==='SUSPECT'`：`SUSPECT` 的产生条件是 `guard>=GUARD.SHOW`，
-  //   而**开戒备本身就把 guard 地板抬到 1**——0.2 秒后必然 SUSPECT，行军队形永远不出现。
-  //   所以这里必须再要一条"有没有敌情线索"（`contact`），否则两条规则互相吃掉。
-  //   只听见枪声（`GUARD.SOUND`）不写 contact，因此不算进入战斗：枪声没有方位，
-  //   要在迷雾里给它编一个位置就违反 98 的"不凭空造情报"。
-  // 用 `isEngaged`（真打起来过）也不行：看见敌人到第一枪之间那段，队伍会排着纵队往前撞。
+  const isEngaged = u => !!u.targetId || u.meet === '已发现' || u.meet === '有预期';
+  // ── 队形只有三个状态，由"戒备开关 + 遇敌档 + 是否在移动"推出 ──
+  // 玩家**不选队形**，只开/关戒备（＝列阵＝战斗准备，`GAME_RULES` §4.9）：
+  //   关                          → 未列阵（SKIRMISH）。走也散、停也散。
+  //   开 + 已发现/有预期          → 战斗队形（BLOCK），**移动、进攻时也保持**。
+  //   开 + 停下                   → 战斗队形（BLOCK）。"停下"与"接敌"在队形上是同一档。
+  //   开 + 在走 + 没接敌          → 行军（COLUMN，两列纵队）。
+  // 2026-11-23：判据从 `alert` 改成 `u.meet`。`alert` 现在只表示"此刻看不看得见"，
+  //   而队形该跟的是**这一波遭遇的档**：已发现/有预期列阵，未预期锁死不能列阵（见 sim 的 updateStanceAuto）。
+  //   "未预期"根本到不了这里——它的 stance 被锁在 LOOSE，上面第二行就返回 SKIRMISH 了。
   // 兵种分支（骑兵楔形/弓兵线阵/三支以上圆阵）**已摘**：阵型形态还没设计，`BLOCK` 是占位。
   //   那三套模板的定义仍留在上面（占格与落点都验过，将来设计阵型要参照），只是不再被选。
   function pickFormation(u) {
     if (!u || u.hp <= 0) return 'BLOCK';
     if (u.isRouted) return 'SKIRMISH';                 // 溃退 > 一切
-    if (u.stance !== 'FORMED') return 'SKIRMISH';      // 109：关着戒备＝散阵
+    if (u.stance !== 'FORMED') return 'SKIRMISH';      // 关着戒备＝未列阵（含"未预期"锁死）
     if (u.rush) return 'RUSH';                         // 冲锋是战斗档的特殊形态，不是兵种分支
-    const inCombat = u.alert === 'ALERT' || (u.alert === 'SUSPECT' && !!u.contact);
+    const inCombat = u.meet === '已发现' || u.meet === '有预期';
     const moving = !!(u.path && u.path.length);
-    if (inCombat || !moving) return 'BLOCK';           // 战斗 或 停下
-    return 'COLUMN';                                   // 只有在走且没敌情
+    if (inCombat || !moving) return 'BLOCK';           // 接敌 或 停下
+    return 'COLUMN';                                   // 只有在走且没接敌
   }
 
   // 表现层的钟（秒）。只用来给行军微摆一个相位，不参与任何判定。
@@ -629,6 +625,19 @@
     }
     return DIR8[best];
   }
+  // 角度 → 八向里最接近的那个。与 `head8` 同一条规则，**喂进去的东西不同**：
+  //   `head8(u)` 读的是 e1 的动画朝向 `stateOf(u).head`（每帧按真实 dt 插值，跟帧率走）；
+  //   d 层判"阵型排不排得下"必须读**唯一朝向账本 `u.turn`**，所以从角度取。
+  //   两个函数摆在一起，是为了让"八向怎么取整"只有一处实现可对照。
+  function dir8Of(a) {
+    const cx = Math.cos(a), cy = Math.sin(a);
+    let best = 0, bd = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const p = cx * DIR8[i][0] + cy * DIR8[i][1];
+      if (p > bd) { bd = p; best = i; }
+    }
+    return DIR8[best];
+  }
   // 一格能不能落脚（**只看地形，不看单位**）：footprint 不参与寻路（Q28a），
   //   这里只是"兵站在水里就别画也别计这一格"的裁剪（Q35）。
   //   node 桩 / 没有地形数据时退回全可画，别让离线测试凭空少一堆兵。
@@ -660,6 +669,61 @@
     }
     return out;
   }
+  // ── 112+：阵型"排不排得下"的几何口（只在落位时调用，不进 A*）───────────────
+  // 「一行装不下、必须排第二行」——判的是**正面那一行**在地形与友军身体上放不放得下。
+  //   一行 = 本地 y 最大的那批兵位；它横向铺到第几格，就扫几格：
+  //     k = round(该排兵位 |x| 的最大值)   ← 正好是最外侧那个兵自己取整后的格偏移
+  //   采样点 = `anchor + forward*该排纵深 + right*t`（t 取 -k..k），再取整到格。
+  //   为什么用采样而不是直接用"兵位取整后的那几格"：中间的格也要看。
+  //   一格宽的墙夹在前排两个兵之间时，两个兵各自的格都是可走的，但这一行事实上被劈开了
+  //   ——采样会把中间那格扫出来，正好兑现"一行装不下"。
+  // 三条硬约束（§4.9）在这里怎么兑现：
+  //   · 二值：只回答放得下／放不下，不量"挤了几成"；
+  //   · 落位时一次：本函数**无状态**，调用方（d 层的 judgeFormFit）只在站定那一步、
+  //     且队形档或八向朝向变过时才调；
+  //   · 不进 A*：纯读，不返回代价、不改路径、不看 footprint 覆盖表（Q28a：寻路只认锚点）。
+  function frontRowCells(u, formKey, atX, atY, dir) {
+    const key = formKey || pickFormation(u);
+    const cells = cellsOf(u, key);
+    if (!cells) return [];
+    let ymax = -Infinity, half = 0;
+    for (let i = 0; i < PARAMS.SLOTS; i++) {
+      const c = cells[i] || [0, 0];
+      if (c[1] > ymax) ymax = c[1];
+    }
+    for (let i = 0; i < PARAMS.SLOTS; i++) {
+      const c = cells[i] || [0, 0];
+      if (c[1] >= ymax - .01) half = Math.max(half, Math.abs(c[0]));
+    }
+    const d = dir || head8(u), hx = d[0], hy = d[1];
+    const ax = atX != null ? atX : Math.round(u.x), ay = atY != null ? atY : Math.round(u.y);
+    const k = Math.round(half);
+    const out = [], seen = new Set();
+    for (let t = -k; t <= k; t++) {
+      // right = (-hy, hx)、forward = (hx, hy)，与 menAt / footprintCells 同一套旋转
+      const dx = Math.round((-hy) * t + hx * ymax);
+      const dy = Math.round(hx * t + hy * ymax);
+      const sk = dx + ',' + dy;
+      if (seen.has(sk)) continue;
+      seen.add(sk);
+      out.push({ dx, dy, x: ax + dx, y: ay + dy });
+    }
+    return out;
+  }
+  // 判一次。`occOf(x,y)` 由 d 层递进来（只有它认识别的部队），true＝这格上有友军身体。
+  // 未列阵（SKIRMISH）不判：没有阵型就没有"一行"，`firm:true` 不带任何含义
+  //   （增益本来就只挂在列阵上，这里给 false 反而会让面板出现"未列阵但排不下"这种假话）。
+  function formFits(u, occOf, dir) {
+    const key = pickFormation(u);
+    if (key === 'SKIRMISH') return { firm: true, key, cells: [], bad: [] };
+    const cells = frontRowCells(u, key, null, null, dir);
+    const bad = [];
+    for (const c of cells) {
+      if (!walkable(c.x, c.y)) bad.push({ x: c.x, y: c.y, why: 'terrain' });
+      else if (occOf && occOf(c.x, c.y)) bad.push({ x: c.x, y: c.y, why: 'ally' });
+    }
+    return { firm: bad.length === 0, key, cells, bad };
+  }
   // 点选包围盒（Q29）：按 footprint 格范围算，比 troopBounds 更贴合"这一队占了哪几格"。
   //   窄桥被裁扁后包围盒跟着变小，点选不会框到隔壁的桥外格。
   function footprintBounds(u, ax, ay, view) {
@@ -685,6 +749,8 @@
     formKeyOf, headOf, stateOf, setFormation,
     // 98：松散集合的占格读口（d 层 occupancy 表 / ui 点选都从这里取）
     footprintCells, footprintBounds, head8, DIR8, cellsOf, walkable,
+    // 112+：阵型排不排得下（d 层 judgeFormFit 调；dir8Of 与 head8 同一规则、不同来源）
+    dir8Of, frontRowCells, formFits,
     // 同格分离（75）：offsetOf 给出这一支当前的锚点偏移（世界像素），测试与调试读它
     offsetOf, stackSlot, stackTarget, anchorOf,
     get time() { return clock; }

@@ -595,6 +595,11 @@
       if(t.dest&&t.dest.type==='place'){
         const l=LM.find(x=>x.id===t.dest.id);
         if(l&&live.every(u=>Math.abs(u.x-l.x)<=1.5&&Math.abs(u.y-l.y)<=1.5)){t.phase='done';continue;}
+        // 113+：**有目的地、没到位、也不动了**——这不是"办完"，是"被停住/被挡住"。
+        //   原来走到下面的兜底一律记 done，于是「全军去北桥」「全军停止」「继续」这一串里
+        //   最后那句永远接不上：focus 已经 done，b 层只能回"刚才那条已经办完"（卷子 B04/A20）。
+        //   新相位 paused 不在 TASK_FINAL 里，所以"继续"能接着发；到位那条分支在上面，照旧 done。
+        if(l){t.phase=t.started?'paused':'issued';continue;}
       }
       // 走到这里说明没有任何 d 层事实支持"还在动"——发过令就是办完了，没发出去还算刚下单。
       t.phase=t.started?'done':'issued';
@@ -903,7 +908,8 @@
     }
     const cmds=[];let inherit=null;
     for(let i=0;i<items.length;i++){
-      const parsed=U.parse(items[i].text);
+      // 115：带 chain 标志——组合句的成句性由下面的 inherit 补，b 层不单独判
+      const parsed=U.parse(items[i].text,{chain:true});
       // 组合句里夹了一段无关内容（"先报告再今天天气怎么样"）：整条不执行，但要指名是第几段，
       //   不能报"第 2 段无效"却让玩家以为是战术没听懂。
       if(parsed.offTopic)return {ok:false,seg:i+1,reason:'这段和战场无关（没有部队、地点或动作）'};
@@ -1456,7 +1462,7 @@
     const tb=tacticBlock(cmd);
     if(tb)return rejectTactic(cmd,src,tb);
     if(cmd.action==='RECON'){
-      const msg='侦察命令（RECON）这一版还没实现。当前获取敌情靠视野：移动接近（正面 8 格），下令戒备可拉到 10 格，队友目视后 11 格内友军会收到通报。';
+      const msg='侦察命令（RECON）这一版还没实现。当前获取敌情只靠视野：平地正面 12 格，侧翼 8.4 格，绕到背后只剩 4.8 格，钻进林子只剩 3 格；戒备不加视野，也不再有友军通报。';
       emit(src, `${msg}${notes().length?`\n（注：${notes().join('；')}）`:''}`);
       return {status:'UNSUPPORTED',interp:'',feedback:'侦察（RECON）命令未实现'};
     }
@@ -1618,7 +1624,9 @@
         const foe=cmd.foeId?sim.enemies.find(e=>e.id===cmd.foeId):null;
         const r=sim.setRush(list,true,false,foe?foe.id:null);
         const ns=notes().slice();
-        ns.push('全力冲锋：速度 +50%、起手提气；代价是体力 4/秒、阵型散开，接战或另下一令即收');
+        // 109 起冲锋**不再破阵**（它隐含转入列阵，见 setRush）。旧回执还写着"阵型散开"，
+        //   是 98 的话术——留着就是回执说谎，112+ 顺手改掉。
+        ns.push('全力冲锋：速度 +50%、起手提气；代价是体力 4/秒，接战或另下一令即收');
         const ord=orderOf({who:list,act:'全力冲锋',tgt:foe?foe.name:null,notes:ns});
         const st=r.n>0?'EXECUTED':'FAILED';
         emit(src, ord, st, lastToast());
@@ -2024,7 +2032,7 @@
             stale:v.stale||0};
         });
         const lines=pool.map(u=>u.hp>0
-          ?`${u.name}：生命 ${u.hp}/${u.maxHp} · 士气 ${Math.round(u.morale)}（${sim.moraleWord(u.morale)}） · 精力 ${Math.round(u.stamina)} · ${u.stance==='FORMED'?'列阵':'散阵'} · ${sim.alertWord(u)} · ${u.state}`
+          ?`${u.name}：生命 ${u.hp}/${u.maxHp} · 士气 ${Math.round(u.morale)}（${sim.moraleWord(u.morale)}） · 精力 ${Math.round(u.stamina)} · ${u.stance==='FORMED'?'列阵':'未列阵'} · ${sim.alertWord(u)} · ${u.state}`
           :`${u.name}：阵亡`);
         // 副将在就由他汇报（带精力/戒备/认知，翻成人话）；不在则回落到字段式输出
         const a=adj();

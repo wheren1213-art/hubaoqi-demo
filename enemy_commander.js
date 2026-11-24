@@ -303,13 +303,12 @@
       for (const e of L.troops) {
         if (e.hp <= 0 || e.isRouted) continue;
         if (e.patrolWait > 0) e.patrolWait = Math.max(0, e.patrolWait - dt);
-        if (e.reactTimer <= 0) {
-          if (e.alert === 'ALERT' && e.contact) {
-            const foe = S.units.find(u => u.id === e.contact.id && u.hp > 0);
-            if (foe && S.canSee(e, foe)) S.turnToward(e, S.directionTo(e, foe), dt);
-          } else if (e.alert === 'SUSPECT' && e.contact) {
-            S.turnToward(e, S.directionTo(e, e.contact), dt);
-          }
+        // 转向看遇敌档（2026-11-23）：已发现→朝敌，有预期→朝最后目击点，未预期→保持原朝向
+        if (e.meet === '已发现' && e.contact) {
+          const foe = S.units.find(u => u.id === e.contact.id && u.hp > 0);
+          if (foe && S.canSee(e, foe)) S.turnToward(e, S.directionTo(e, foe), dt);
+        } else if (e.meet === '有预期' && e.contact) {
+          S.turnToward(e, S.directionTo(e, e.contact), dt);
         }
       }
       // 53 态势与意图：1 秒一次（比 0.55 秒的战术拍慢一档——战略不该跟着每一帧抖）。
@@ -1244,8 +1243,8 @@
       }
     }
 
-    // ⑨ 查证（有目视情报但此刻看不见人）与 ⑩ 巡逻（兜底，永远在场）
-    if ((e.alert === 'ALERT' || e.alert === 'SUSPECT') && e.contact && P.investigate)
+    // ⑨ 查证（定过档、手里有位置，但此刻看不见人）与 ⑩ 巡逻（兜底，永远在场）
+    if (e.meet && e.alert !== 'ALERT' && e.contact && P.investigate)
       out.push({ a: ACT.INVESTIGATE, s: 4, run: () => S.investigate(e, e.contact) });
     out.push({ a: ACT.PATROL, s: 2, run: () => S.patrolStep(e) });
     return out;
